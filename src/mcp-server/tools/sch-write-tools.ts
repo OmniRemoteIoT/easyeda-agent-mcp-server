@@ -28,7 +28,7 @@ export function registerSchWriteTools(server: McpServer, bridge: WebSocketBridge
 
 	server.tool(
 		'sch_create_net_flag',
-		'Create a Power/Ground/AnalogGround/ProtectGround net flag in the schematic. Returns the created flag component (with its primitiveId). Note: a net flag placed at a pin does not by itself establish an electrical net in the netlist — API-inserted connectivity is not computed the way interactively-drawn connections are (see sch_set_netlist for programmatic connectivity).',
+		'Create a Power/Ground/AnalogGround/ProtectGround net flag in the schematic. Fire-and-forget: EDA Pro does not send a response for this call, so it resolves immediately without confirmation — verify placement with sch_get_all_components (componentType "netflag") or visually. Note: a net flag placed at a pin does NOT by itself establish an electrical net in the netlist (API-inserted connectivity is not computed like interactive edits; see sch_set_netlist for programmatic connectivity).',
 		{
 			identification: z
 				.enum(['Power', 'Ground', 'AnalogGround', 'ProtectGround'])
@@ -40,14 +40,14 @@ export function registerSchWriteTools(server: McpServer, bridge: WebSocketBridge
 			mirror: z.boolean().optional().describe('Whether to mirror'),
 		},
 		async (params) => {
-			const result = await bridge.send('sch.component.createNetFlag', params);
+			const result = await bridge.send('sch.component.createNetFlag', params, { fireAndForget: true });
 			return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
 		},
 	);
 
 	server.tool(
 		'sch_create_net_port',
-		'Create an IN/OUT/BI directional net port in the schematic. Returns the created port component (with its primitiveId). Note: like net flags, a port placed at a pin does not by itself form an electrical net in the netlist (see sch_set_netlist for programmatic connectivity).',
+		'Create an IN/OUT/BI directional net port in the schematic. Fire-and-forget: EDA Pro does not send a response, so it resolves immediately without confirmation — verify visually. Note: like net flags, a port placed at a pin does not by itself form an electrical net in the netlist (see sch_set_netlist for programmatic connectivity).',
 		{
 			direction: z.enum(['IN', 'OUT', 'BI']).describe('Port direction'),
 			net: z.string().describe('Net name'),
@@ -57,7 +57,7 @@ export function registerSchWriteTools(server: McpServer, bridge: WebSocketBridge
 			mirror: z.boolean().optional().describe('Whether to mirror'),
 		},
 		async (params) => {
-			const result = await bridge.send('sch.component.createNetPort', params);
+			const result = await bridge.send('sch.component.createNetPort', params, { fireAndForget: true });
 			return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
 		},
 	);
