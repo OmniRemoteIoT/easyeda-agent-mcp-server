@@ -102,7 +102,7 @@ Use this at the start of a session to understand what project is loaded and get 
 		'rename',
 		`Rename the current project, or a schematic / schematic page / PCB / board in the open EasyEDA Pro project.
 Use get_project first to obtain the UUID (or, for a board, its current name).
-- target "project": renames the current project's friendly name (no uuid needed).
+- target "project": renames the current project's friendly name (no uuid needed). NOTE: the underlying SDK call is unofficial and typically returns false / no-ops for the currently-open project — schematic/schematicPage/pcb/board renames work reliably, project rename often does not.
 - target "schematic" / "schematicPage" / "pcb": pass the matching UUID from get_project.
 - target "board": pass originalBoardName (the board's current name).
 Returns true on success.`,

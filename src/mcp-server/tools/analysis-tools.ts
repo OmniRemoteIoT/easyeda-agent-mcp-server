@@ -137,13 +137,13 @@ export function registerAnalysisTools(server: McpServer, bridge: WebSocketBridge
 
 	server.tool(
 		'pcb_import_changes',
-		'Import changes from schematic into the PCB (sync schematic to PCB)',
+		'Import changes from schematic into the PCB (sync schematic to PCB). IMPORTANT: EDA Pro opens a modal "Confirm Importing changes" dialog and this call returns true as soon as the dialog is shown — the changes are NOT applied until the user clicks "Apply Changes" in EasyEDA. There is no API to auto-apply; tell the user to click Apply Changes, then verify with pcb_get_all_primitives.',
 		{
 			uuid: z.string().optional().describe('Schematic UUID (uses associated schematic if not provided)'),
 		},
 		async ({ uuid }) => {
 			const result = await bridge.send('pcb.document.importChanges', { uuid });
-			return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+			return { content: [{ type: 'text', text: JSON.stringify({ dialogOpened: result, note: 'Confirm dialog shown in EasyEDA — user must click "Apply Changes" to apply.' }, null, 2) }] };
 		},
 	);
 }

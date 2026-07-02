@@ -28,7 +28,7 @@ export function registerSchWriteTools(server: McpServer, bridge: WebSocketBridge
 
 	server.tool(
 		'sch_create_net_flag',
-		'Create a Power/Ground/AnalogGround/ProtectGround net flag in the schematic. Note: EDA Pro may not send a response for this operation — the request is sent fire-and-forget style. Verify placement visually.',
+		'Create a Power/Ground/AnalogGround/ProtectGround net flag in the schematic. Returns the created flag component (with its primitiveId). Note: a net flag placed at a pin does not by itself establish an electrical net in the netlist — API-inserted connectivity is not computed the way interactively-drawn connections are (see sch_set_netlist for programmatic connectivity).',
 		{
 			identification: z
 				.enum(['Power', 'Ground', 'AnalogGround', 'ProtectGround'])
@@ -40,14 +40,14 @@ export function registerSchWriteTools(server: McpServer, bridge: WebSocketBridge
 			mirror: z.boolean().optional().describe('Whether to mirror'),
 		},
 		async (params) => {
-			const result = await bridge.send('sch.component.createNetFlag', params, { fireAndForget: true });
+			const result = await bridge.send('sch.component.createNetFlag', params);
 			return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
 		},
 	);
 
 	server.tool(
 		'sch_create_net_port',
-		'Create an IN/OUT/BI directional net port in the schematic. Note: EDA Pro may not send a response for this operation — the request is sent fire-and-forget style. Verify placement visually.',
+		'Create an IN/OUT/BI directional net port in the schematic. Returns the created port component (with its primitiveId). Note: like net flags, a port placed at a pin does not by itself form an electrical net in the netlist (see sch_set_netlist for programmatic connectivity).',
 		{
 			direction: z.enum(['IN', 'OUT', 'BI']).describe('Port direction'),
 			net: z.string().describe('Net name'),
@@ -57,7 +57,7 @@ export function registerSchWriteTools(server: McpServer, bridge: WebSocketBridge
 			mirror: z.boolean().optional().describe('Whether to mirror'),
 		},
 		async (params) => {
-			const result = await bridge.send('sch.component.createNetPort', params, { fireAndForget: true });
+			const result = await bridge.send('sch.component.createNetPort', params);
 			return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
 		},
 	);
@@ -103,7 +103,7 @@ export function registerSchWriteTools(server: McpServer, bridge: WebSocketBridge
 
 	server.tool(
 		'sch_create_wire',
-		'Create a wire in the schematic defined by a series of coordinate points',
+		'Create a wire (geometry) in the schematic defined by a series of coordinate points. IMPORTANT: this draws the wire but does NOT compute electrical connectivity — even endpoints coincident with component pins do not form a net in the netlist (EDA Pro only recomputes connectivity for interactive edits, and exposes no rebuild API). For programmatic connectivity, define nets with sch_set_netlist. Use this tool for visual wiring / annotation.',
 		{
 			line: z
 				.union([
@@ -199,13 +199,13 @@ export function registerSchWriteTools(server: McpServer, bridge: WebSocketBridge
 
 	server.tool(
 		'sch_set_netlist',
-		'Update the schematic netlist',
+		'Update the schematic netlist — the programmatic way to define electrical connectivity (since drawn wires do not auto-connect via the API). Provide a netlist string in the given format (round-trip a known-good one from sch_get_netlist to learn the exact format, then edit the net membership). type should match the netlist string format.',
 		{
 			type: z
 				.enum(['Allegro', 'PADS', 'Protel2', 'JLCEDA', 'EasyEDA', 'DISA'])
 				.optional()
-				.describe('Netlist format type'),
-			netlist: z.string().describe('Netlist data string'),
+				.describe('Netlist format type (must match the netlist string)'),
+			netlist: z.string().describe('Netlist data string (same format as sch_get_netlist output)'),
 		},
 		async ({ type, netlist }) => {
 			const result = await bridge.send('sch.netlist.set', { type, netlist });

@@ -78,6 +78,30 @@ let activeExtensionUuid = '';
 let lastMessageAt = 0;
 /** True after the first successful connect — prevents repeated auto-open on reconnects. */
 let pairedDocumentOpened = false;
+/** True once the window-focus reconnect listener is registered (register only once). */
+let focusReconnectRegistered = false;
+
+/**
+ * Reconnect when the EasyEDA window regains focus.
+ *
+ * While EasyEDA is backgrounded, the OS/Chromium throttles JS timers, so the
+ * heartbeat/staleness loop can't detect a dropped socket or reconnect. A drop
+ * that happens while backgrounded therefore lingers until the user clicks
+ * "Connect Claude". The `focus` window event is NOT throttled, so on regaining
+ * focus we do an immediate staleness check and reconnect if needed — recovery
+ * becomes automatic the moment the user returns to EasyEDA.
+ */
+function setupFocusReconnect(extensionUuid: string): void {
+	if (focusReconnectRegistered) return;
+	try {
+		eda.sys_Window.addEventListener('focus' as any, () => {
+			if (Date.now() - lastMessageAt > STALE_MS) {
+				connectToMcpServer(extensionUuid);
+			}
+		});
+		focusReconnectRegistered = true;
+	} catch { /* addEventListener unavailable — non-fatal */ }
+}
 
 const rawHandlers: Record<string, (params: Record<string, any>) => Promise<any>> = {
 	...componentHandlers,
@@ -268,6 +292,7 @@ function scheduleReconnect(extensionUuid: string): void {
 export function connectToMcpServer(extensionUuid: string): void {
 	stopHeartbeat();
 	activeExtensionUuid = extensionUuid;
+	setupFocusReconnect(extensionUuid);
 
 	const WS_ID = getWsId();
 	let editorType = detectEditorType();

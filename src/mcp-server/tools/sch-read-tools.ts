@@ -154,13 +154,20 @@ export function registerSchReadTools(server: McpServer, bridge: WebSocketBridge)
 
 	server.tool(
 		'sch_run_drc',
-		'Run Design Rule Check (DRC) on the schematic',
+		'Run Design Rule Check (DRC) on the schematic. The EDA API only returns a boolean (unlike pcb_run_drc, there is no detailed violation list for schematics) — true = no errors, false = errors found (in strict mode a Warning also yields false). The detailed results appear in the EasyEDA DRC panel at the bottom, which opens automatically when errors exist.',
 		{
-			strict: z.boolean().optional().describe('Whether to run strict DRC checks'),
-			userInterface: z.boolean().optional().describe('Whether to show DRC results in UI'),
+			strict: z.boolean().optional().describe('Strict mode — a Warning (not just an Error) makes the check return false'),
+			userInterface: z.boolean().optional().describe('Show the DRC results panel in EasyEDA (default true)'),
 		},
 		async ({ strict, userInterface }) => {
-			const result = await bridge.send('sch.drc.check', { strict, userInterface });
+			const ui = userInterface ?? true;
+			const passed = await bridge.send('sch.drc.check', { strict, userInterface: ui });
+			const result = {
+				passed,
+				note: passed
+					? 'No DRC errors.'
+					: 'DRC found errors (or warnings, in strict mode). See the DRC panel in EasyEDA for details — the schematic DRC API does not expose a per-violation list.',
+			};
 			return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
 		},
 	);

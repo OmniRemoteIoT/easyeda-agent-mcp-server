@@ -29,7 +29,7 @@ export function registerWriteTools(server: McpServer, bridge: WebSocketBridge): 
 
 	server.tool(
 		'pcb_create_track',
-		'Create a single track segment (line) between two points on a specified layer and net',
+		'Create a single track segment (line) between two points on a specified layer and net. UNITS: all coordinates and widths are in the PCB document\'s current display unit (mil by default, not mm — 1 mil = 0.0254 mm). Check/set the unit selector in EasyEDA to match your intent.',
 		{
 			net: z.string().describe('Net name for the track'),
 			layer: z.string().describe('Layer name (e.g. "TopLayer", "BottomLayer", "InnerLayer1")'),
@@ -65,7 +65,7 @@ export function registerWriteTools(server: McpServer, bridge: WebSocketBridge): 
 
 	server.tool(
 		'pcb_create_via',
-		'Create a via at the specified position',
+		'Create a via at the specified position. UNITS: position and diameters are in the PCB document\'s current display unit (mil by default, not mm — 1 mil = 0.0254 mm). A too-small value will fail DRC (e.g. diameter 0.6 is read as 0.6 mil, far below the ~19.7 mil minimum).',
 		{
 			net: z.string().describe('Net name'),
 			x: z.number().describe('X coordinate'),
@@ -101,7 +101,7 @@ export function registerWriteTools(server: McpServer, bridge: WebSocketBridge): 
 
 	server.tool(
 		'pcb_create_pad',
-		'Create a standalone pad on the PCB',
+		'Create a standalone pad on the PCB. UNITS: position and sizes are in the PCB document\'s current display unit (mil by default, not mm — 1 mil = 0.0254 mm).',
 		{
 			layer: z.string().describe('Pad layer'),
 			padNumber: z.string().describe('Pad number/name'),
@@ -138,7 +138,7 @@ export function registerWriteTools(server: McpServer, bridge: WebSocketBridge): 
 
 	server.tool(
 		'pcb_move_component',
-		'Move and/or rotate a component. Can also change its layer (flip), lock status, designator, etc.',
+		'Move and/or rotate a component. Can also change its layer (flip to "BottomLayer" for two-sided placement), lock status, designator, etc. UNITS: x/y are in the PCB document\'s current display unit (mil by default, not mm).',
 		{
 			primitiveId: z.string().describe('The component primitive ID'),
 			x: z.number().optional().describe('New X coordinate'),
