@@ -100,21 +100,48 @@ const rawHandlers: Record<string, (params: Record<string, any>) => Promise<any>>
 };
 
 /**
- * Bring the schematic/PCB tab to the foreground before running a command.
- * EDA Pro requires the relevant tab to be active for most read/write APIs.
- * openDocument() on the current doc UUID re-activates it without side effects.
+ * Find the UUID of the first schematic page or first PCB in the current project.
+ * Case-insensitive on itemType because the project tree uses mixed case
+ * (e.g. "Board", "Schematic", "PCB"), not the uppercase forms.
+ */
+async function findEditorDocUuid(editorPrefix: 'sch' | 'pcb'): Promise<string | undefined> {
+	try {
+		const project = await eda.dmt_Project.getCurrentProjectInfo();
+		if (!project?.data) return undefined;
+		for (const item of project.data) {
+			const t = String((item as any).itemType || '').toUpperCase();
+			if (editorPrefix === 'pcb') {
+				if (t === 'PCB' && (item as any).uuid) return (item as any).uuid;
+				if (t === 'BOARD' && (item as any).pcb?.uuid) return (item as any).pcb.uuid;
+			} else {
+				if (t === 'SCHEMATIC' && (item as any).page?.[0]?.uuid) return (item as any).page[0].uuid;
+				if (t === 'BOARD' && (item as any).schematic?.page?.[0]?.uuid) return (item as any).schematic.page[0].uuid;
+			}
+		}
+	} catch { /* non-fatal */ }
+	return undefined;
+}
+
+/**
+ * Make the schematic/PCB the ACTIVE editor before running a command, so a single
+ * connection can drive both editors (switch tabs per command instead of needing a
+ * separate connection per editor). EDA Pro targets canvas ops at the active document.
+ *
+ * documentType: 1 = SCHEMATIC_PAGE, 3 = PCB (EDMT_EditorDocumentType). If the wanted
+ * editor is already active, do nothing — re-opening on every command thrashed the
+ * editor and dropped the WebSocket. Otherwise open the target editor's document to
+ * switch to it (the old code re-opened the *current* doc, so it never switched).
  */
 async function focusEditorTab(editorPrefix: 'sch' | 'pcb'): Promise<void> {
 	try {
 		const docInfo = await eda.dmt_EditorControl.getCurrentDocumentInfo();
-		if (!docInfo?.uuid) return;
-		// documentType: 1 = SCHEMATIC_PAGE, 3 = PCB (EDMT_EditorDocumentType).
-		// If the active tab is already the editor we need, do nothing — re-opening the
-		// document on every command thrashed the editor and dropped the WebSocket.
-		const dt = (docInfo as any).documentType;
+		const dt = (docInfo as any)?.documentType;
 		if (editorPrefix === 'sch' && dt === 1) return;
 		if (editorPrefix === 'pcb' && dt === 3) return;
-		await eda.dmt_EditorControl.openDocument(docInfo.uuid);
+		const targetUuid = await findEditorDocUuid(editorPrefix);
+		if (targetUuid) {
+			await eda.dmt_EditorControl.openDocument(targetUuid);
+		}
 	} catch { /* non-fatal */ }
 }
 
@@ -149,9 +176,17 @@ for (const [method, handler] of Object.entries(rawHandlers)) {
 	allHandlers[method] = wrapHandler(method, handler);
 }
 
-// Editor context detection — reports which editor type is currently active
+// Editor context detection — reports which editor type is currently active.
+// Prefer the active document's type (authoritative) over the sch_Document/pcb_Document
+// presence check, which can't tell which canvas is currently active.
 allHandlers['sys.getEditorContext'] = async () => {
-	const editorType = detectEditorType();
+	let editorType = detectEditorType();
+	try {
+		const info = await eda.dmt_EditorControl.getCurrentDocumentInfo();
+		const dt = (info as any)?.documentType;
+		if (dt === 1) editorType = 'schematic';
+		else if (dt === 3) editorType = 'pcb';
+	} catch { /* fall back to detectEditorType */ }
 	// Also try to get the current project name for context
 	let projectName: string | undefined;
 	try {
@@ -179,39 +214,8 @@ allHandlers['sys.ping'] = async () => ({ pong: true });
 async function openPairedDocument(editorType: 'schematic' | 'pcb' | 'unknown'): Promise<void> {
 	if (editorType === 'unknown') return;
 	try {
-		const project = await eda.dmt_Project.getCurrentProjectInfo();
-		if (!project?.data) return;
-
-		let targetUuid: string | undefined;
-
-		if (editorType === 'schematic') {
-			// Connected from schematic — open the first PCB
-			for (const item of project.data) {
-				const t = (item as any).itemType;
-				if (t === 'PCB' && (item as any).uuid) {
-					targetUuid = (item as any).uuid;
-					break;
-				}
-				if (t === 'BOARD' && (item as any).pcb?.uuid) {
-					targetUuid = (item as any).pcb.uuid;
-					break;
-				}
-			}
-		} else {
-			// Connected from PCB — open the first schematic page
-			for (const item of project.data) {
-				const t = (item as any).itemType;
-				if (t === 'SCHEMATIC' && (item as any).page?.[0]?.uuid) {
-					targetUuid = (item as any).page[0].uuid;
-					break;
-				}
-				if (t === 'BOARD' && (item as any).schematic?.page?.[0]?.uuid) {
-					targetUuid = (item as any).schematic.page[0].uuid;
-					break;
-				}
-			}
-		}
-
+		// Connected from schematic → open the first PCB; from PCB → open the first schematic page.
+		const targetUuid = await findEditorDocUuid(editorType === 'schematic' ? 'pcb' : 'sch');
 		if (targetUuid) {
 			await eda.dmt_EditorControl.openDocument(targetUuid);
 		}
