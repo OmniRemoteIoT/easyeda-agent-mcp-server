@@ -3,10 +3,10 @@
 	"uuid": "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6",
 	"displayName": "EasyEDA Agent",
 	"description": "MCP Bridge - Connect Claude Code to EasyEDA Pro",
-	"version": "1.0.0",
+	"version": "1.1.2",
 	"publisher": "",
 	"engines": {
-		"eda": "^2.3.0"
+		"eda": "^2.2.0"
 	},
 	"license": "MIT",
 	"repository": {
@@ -18,11 +18,36 @@
 	"images": {
 		"logo": "./images/logo.png"
 	},
-	"activationEvents": {},
+	"activationEvents": {
+		"onStartupFinished": true
+	},
 	"entry": "./dist/index",
 	"dependentExtensions": {},
 	"headerMenus": {
 		"pcb": [
+			{
+				"id": "ClaudeMCP",
+				"title": "Claude",
+				"menuItems": [
+					{
+						"id": "ConnectClaude",
+						"title": "Connect Claude",
+						"registerFn": "connectClaude"
+					},
+					{
+						"id": "DisconnectClaude",
+						"title": "Disconnect Claude",
+						"registerFn": "disconnectClaude"
+					},
+					{
+						"id": "About",
+						"title": "About...",
+						"registerFn": "about"
+					}
+				]
+			}
+		],
+		"schematic": [
 			{
 				"id": "ClaudeMCP",
 				"title": "Claude",

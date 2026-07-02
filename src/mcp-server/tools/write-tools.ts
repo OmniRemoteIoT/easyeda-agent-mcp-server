@@ -117,44 +117,6 @@ export function registerWriteTools(server: McpServer, bridge: WebSocketBridge): 
 	);
 
 	server.tool(
-		'pcb_create_pour',
-		'Create a copper pour region on the PCB',
-		{
-			net: z.string().describe('Net name for the pour'),
-			layer: z.string().describe('Layer name'),
-			polygon: z
-				.array(z.union([z.string(), z.number()]))
-				.describe('Polygon source array, e.g. ["L", x1, y1, x2, y2, ..., x1, y1]'),
-			pourFillMethod: z.enum(['solid', '45grid', '90grid']).optional().describe('Fill method'),
-			preserveSilos: z.boolean().optional().describe('Whether to preserve copper islands'),
-			pourName: z.string().optional().describe('Name for the pour region'),
-			pourPriority: z.number().optional().describe('Pour priority (higher = poured first)'),
-			lineWidth: z.number().optional().describe('Line width'),
-		},
-		async (params) => {
-			const result = await bridge.send('pcb.create.pour', params);
-			return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
-		},
-	);
-
-	server.tool(
-		'pcb_create_fill',
-		'Create a fill region on the PCB',
-		{
-			layer: z.string().describe('Layer name'),
-			polygon: z
-				.array(z.union([z.string(), z.number()]))
-				.describe('Polygon source array, e.g. ["L", x1, y1, x2, y2, ..., x1, y1]'),
-			net: z.string().optional().describe('Net name'),
-			lineWidth: z.number().optional().describe('Line width'),
-		},
-		async (params) => {
-			const result = await bridge.send('pcb.create.fill', params);
-			return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
-		},
-	);
-
-	server.tool(
 		'pcb_create_region',
 		'Create a design rule region (keepout/constraint area) on the PCB',
 		{

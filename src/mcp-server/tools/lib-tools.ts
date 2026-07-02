@@ -33,7 +33,7 @@ export function registerLibTools(server: McpServer, bridge: WebSocketBridge): vo
 
 	server.tool(
 		'lib_get_device_by_lcsc',
-		'Get device(s) by LCSC C-number(s). Useful for finding specific components like "C17414" for a 2.2k resistor.',
+		'Get device(s) by LCSC C-number(s). WARNING: EDA Pro sometimes returns a different part than requested. Always verify the returned component value/description matches your intent before placing.',
 		{
 			lcscIds: z
 				.union([z.string(), z.array(z.string())])
@@ -42,7 +42,14 @@ export function registerLibTools(server: McpServer, bridge: WebSocketBridge): vo
 		},
 		async ({ lcscIds, libraryUuid }) => {
 			const result = await bridge.send('lib.device.getByLcscIds', { lcscIds, libraryUuid });
-			return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+			// Add verification warnings: check that returned LCSC IDs match what was requested
+			const requestedIds = Array.isArray(lcscIds) ? lcscIds : [lcscIds];
+			const warnings = verifyLcscResults(result, requestedIds);
+			const output: Record<string, unknown> = { result };
+			if (warnings.length > 0) {
+				output._warnings = warnings;
+			}
+			return { content: [{ type: 'text', text: JSON.stringify(output, null, 2) }] };
 		},
 	);
 
@@ -65,4 +72,41 @@ export function registerLibTools(server: McpServer, bridge: WebSocketBridge): vo
 			return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
 		},
 	);
+}
+
+/**
+ * Verify that LCSC lookup results match the requested IDs.
+ * EDA Pro sometimes returns different parts than requested.
+ */
+function verifyLcscResults(result: unknown, requestedIds: string[]): string[] {
+	const warnings: string[] = [];
+	if (!result || typeof result !== 'object') return warnings;
+
+	const items = Array.isArray(result) ? result : [result];
+
+	// Check if any requested IDs are missing from results
+	const returnedLcscIds = new Set<string>();
+	for (const item of items) {
+		if (item && typeof item === 'object') {
+			const obj = item as Record<string, unknown>;
+			// Check common fields where LCSC ID might appear
+			for (const key of ['lcscId', 'supplierId', 'supplierNumber', 'lcsc']) {
+				if (typeof obj[key] === 'string') {
+					returnedLcscIds.add(obj[key] as string);
+				}
+			}
+		}
+	}
+
+	if (returnedLcscIds.size > 0) {
+		for (const id of requestedIds) {
+			if (!returnedLcscIds.has(id)) {
+				warnings.push(`LCSC ID "${id}" was requested but the returned part may not match. Verify component value before placing.`);
+			}
+		}
+	} else {
+		warnings.push('Could not verify LCSC IDs in response. Verify component values before placing.');
+	}
+
+	return warnings;
 }

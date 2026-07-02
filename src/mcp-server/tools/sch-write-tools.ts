@@ -28,7 +28,7 @@ export function registerSchWriteTools(server: McpServer, bridge: WebSocketBridge
 
 	server.tool(
 		'sch_create_net_flag',
-		'Create a Power/Ground/AnalogGround/ProtectGround net flag in the schematic',
+		'Create a Power/Ground/AnalogGround/ProtectGround net flag in the schematic. Note: EDA Pro may not send a response for this operation — the request is sent fire-and-forget style. Verify placement visually.',
 		{
 			identification: z
 				.enum(['Power', 'Ground', 'AnalogGround', 'ProtectGround'])
@@ -40,14 +40,14 @@ export function registerSchWriteTools(server: McpServer, bridge: WebSocketBridge
 			mirror: z.boolean().optional().describe('Whether to mirror'),
 		},
 		async (params) => {
-			const result = await bridge.send('sch.component.createNetFlag', params);
+			const result = await bridge.send('sch.component.createNetFlag', params, { fireAndForget: true });
 			return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
 		},
 	);
 
 	server.tool(
 		'sch_create_net_port',
-		'Create an IN/OUT/BI directional net port in the schematic',
+		'Create an IN/OUT/BI directional net port in the schematic. Note: EDA Pro may not send a response for this operation — the request is sent fire-and-forget style. Verify placement visually.',
 		{
 			direction: z.enum(['IN', 'OUT', 'BI']).describe('Port direction'),
 			net: z.string().describe('Net name'),
@@ -57,7 +57,7 @@ export function registerSchWriteTools(server: McpServer, bridge: WebSocketBridge
 			mirror: z.boolean().optional().describe('Whether to mirror'),
 		},
 		async (params) => {
-			const result = await bridge.send('sch.component.createNetPort', params);
+			const result = await bridge.send('sch.component.createNetPort', params, { fireAndForget: true });
 			return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
 		},
 	);
@@ -97,7 +97,7 @@ export function registerSchWriteTools(server: McpServer, bridge: WebSocketBridge
 		},
 		async ({ primitiveId, ...property }) => {
 			const result = await bridge.send('sch.component.modify', { primitiveId, property });
-			return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+			return { content: [{ type: 'text', text: JSON.stringify(result ?? { success: true }, null, 2) }] };
 		},
 	);
 
@@ -229,6 +229,31 @@ export function registerSchWriteTools(server: McpServer, bridge: WebSocketBridge
 		{},
 		async () => {
 			const result = await bridge.send('sch.document.importChanges');
+			return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+		},
+	);
+
+	server.tool(
+		'sch_cross_probe',
+		'Cross-probe select between schematic and PCB: highlight/select specific components, pins, or nets in both editors simultaneously',
+		{
+			components: z
+				.array(z.string())
+				.optional()
+				.describe('Component designators to cross-probe (e.g. ["R1", "U2"])'),
+			pins: z
+				.array(z.object({ designator: z.string(), pin: z.string() }))
+				.optional()
+				.describe('Specific pins to cross-probe (e.g. [{designator: "U1", pin: "1"}])'),
+			nets: z
+				.array(z.string())
+				.optional()
+				.describe('Net names to cross-probe (e.g. ["GND", "VCC"])'),
+			highlight: z.boolean().optional().describe('Whether to highlight the probed items'),
+			select: z.boolean().optional().describe('Whether to select the probed items'),
+		},
+		async (params) => {
+			const result = await bridge.send('sch.select.crossProbe', params);
 			return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
 		},
 	);

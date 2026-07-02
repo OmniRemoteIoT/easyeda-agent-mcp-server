@@ -67,6 +67,70 @@ export function registerPourFillTools(server: McpServer, bridge: WebSocketBridge
 	);
 
 	server.tool(
+		'pcb_create_fill',
+		'Create a solid fill region on the PCB. The polygon should be a flat array like ["L", x1, y1, x2, y2, ..., x1, y1] where "L" indicates line segments.',
+		{
+			layer: z.string().describe('Layer name (e.g. "TopLayer", "BottomLayer")'),
+			polygon: z
+				.array(z.union([z.string(), z.number()]))
+				.describe('Polygon source array, e.g. ["L", x1, y1, x2, y2, ..., x1, y1]'),
+			net: z.string().optional().describe('Net name to assign'),
+			fillMode: z.string().optional().describe('Fill mode'),
+			lineWidth: z.number().optional().describe('Line width'),
+			primitiveLock: z.boolean().optional().describe('Whether to lock the fill'),
+		},
+		async (params) => {
+			const result = await bridge.send('pcb.create.fill', params);
+			return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+		},
+	);
+
+	server.tool(
+		'pcb_modify_pour',
+		'Modify properties of an existing copper pour',
+		{
+			primitiveId: z.string().describe('The pour primitive ID'),
+			property: z
+				.object({
+					net: z.string().optional(),
+					layer: z.string().optional(),
+					pourFillMethod: z.enum(['solid', '45grid', '90grid']).optional(),
+					preserveSilos: z.boolean().optional(),
+					pourName: z.string().optional(),
+					pourPriority: z.number().optional(),
+					lineWidth: z.number().optional(),
+					primitiveLock: z.boolean().optional(),
+				})
+				.describe('Properties to update'),
+		},
+		async ({ primitiveId, property }) => {
+			const result = await bridge.send('pcb.modify.pour', { primitiveId, property });
+			return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+		},
+	);
+
+	server.tool(
+		'pcb_modify_fill',
+		'Modify properties of an existing fill region',
+		{
+			primitiveId: z.string().describe('The fill primitive ID'),
+			property: z
+				.object({
+					layer: z.string().optional(),
+					net: z.string().optional(),
+					fillMode: z.string().optional(),
+					lineWidth: z.number().optional(),
+					primitiveLock: z.boolean().optional(),
+				})
+				.describe('Properties to update'),
+		},
+		async ({ primitiveId, property }) => {
+			const result = await bridge.send('pcb.modify.fill', { primitiveId, property });
+			return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+		},
+	);
+
+	server.tool(
 		'pcb_delete_fills',
 		'Delete fill regions by their IDs',
 		{

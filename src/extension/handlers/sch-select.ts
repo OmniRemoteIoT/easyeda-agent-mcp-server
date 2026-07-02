@@ -1,6 +1,8 @@
 export const schSelectHandlers: Record<string, (params: Record<string, any>) => Promise<any>> = {
 	'sch.select.getAll': async () => {
-		return eda.sch_SelectControl.getAllSelectedPrimitives();
+		// getAllSelectedPrimitives() serializes full primitive objects and can hang on large
+		// schematics. Use the IDs-only call instead; callers can fetch details with get() if needed.
+		return eda.sch_SelectControl.getAllSelectedPrimitives_PrimitiveId();
 	},
 
 	'sch.select.getAllIds': async () => {

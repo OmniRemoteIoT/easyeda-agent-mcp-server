@@ -38,13 +38,17 @@ export function registerSchReadTools(server: McpServer, bridge: WebSocketBridge)
 
 	server.tool(
 		'sch_get_component_pins',
-		'Get all pins of a schematic component by its primitive ID',
+		'Get all pins of a schematic component by its primitive ID. Pin Y coordinates are normalized to match component placement coordinates (EDA Pro natively returns negated Y for pins).',
 		{
 			primitiveId: z.string().describe('The component primitive ID'),
 		},
 		async ({ primitiveId }) => {
 			const result = await bridge.send('sch.component.getAllPins', { primitiveId });
-			return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+			// Normalize pin Y coordinates: EDA Pro returns pin Y values negated relative to
+			// component placement coordinates. Negate them so pin positions are in the same
+			// coordinate space as component placement (x, y).
+			const normalized = normalizePinCoordinates(result);
+			return { content: [{ type: 'text', text: JSON.stringify(normalized, null, 2) }] };
 		},
 	);
 
@@ -79,7 +83,7 @@ export function registerSchReadTools(server: McpServer, bridge: WebSocketBridge)
 
 	server.tool(
 		'sch_get_selected',
-		'Get all currently selected primitives in the schematic editor',
+		'Get primitive IDs of all currently selected primitives in the schematic editor. Use sch_get_component on returned IDs to fetch full details.',
 		{},
 		async () => {
 			const result = await bridge.send('sch.select.getAll');
@@ -160,4 +164,38 @@ export function registerSchReadTools(server: McpServer, bridge: WebSocketBridge)
 			return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
 		},
 	);
+}
+
+/**
+ * Normalize pin Y coordinates from EDA Pro's native format.
+ * EDA Pro returns pin Y values negated relative to component placement coordinates.
+ * This function negates Y values so pins are in the same coordinate space as placements.
+ */
+function normalizePinCoordinates(result: unknown): unknown {
+	if (!result || typeof result !== 'object') return result;
+
+	if (Array.isArray(result)) {
+		return result.map((pin) => normalizePinY(pin));
+	}
+
+	return result;
+}
+
+function normalizePinY(pin: unknown): unknown {
+	if (!pin || typeof pin !== 'object') return pin;
+	const p = pin as Record<string, unknown>;
+	const out = { ...p };
+
+	if (typeof p.y === 'number') {
+		out._rawY = p.y;
+		out.y = -p.y;
+	}
+	if (typeof p.pinDot === 'object' && p.pinDot !== null) {
+		const dot = p.pinDot as Record<string, unknown>;
+		if (typeof dot.y === 'number') {
+			out.pinDot = { ...dot, _rawY: dot.y, y: -dot.y };
+		}
+	}
+
+	return out;
 }

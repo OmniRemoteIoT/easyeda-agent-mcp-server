@@ -3,13 +3,27 @@ import { connectToMcpServer, disconnectFromMcpServer } from './ws-client';
 
 let connected = false;
 
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-export function activate(status?: 'onStartupFinished', arg?: string): void {}
+export function activate(status?: 'onStartupFinished', arg?: string): void {
+	// Auto-connect on startup so no manual "Connect Claude" click is needed
+	if (!connected) {
+		try {
+			connectToMcpServer(extensionConfig.uuid);
+			connected = true;
+		} catch {
+			// Silently fail on startup — user can manually connect via menu
+		}
+	}
+}
 
 export function connectClaude(): void {
+	// Always close first — the connection may have dropped silently (no onClose callback in the API)
 	if (connected) {
-		eda.sys_Message.showWarningMessage('Already connected to Claude MCP Server');
-		return;
+		try {
+			disconnectFromMcpServer(extensionConfig.uuid);
+		} catch {
+			// Ignore — may already be closed
+		}
+		connected = false;
 	}
 	try {
 		connectToMcpServer(extensionConfig.uuid);
