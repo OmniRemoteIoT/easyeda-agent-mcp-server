@@ -80,6 +80,8 @@ let lastMessageAt = 0;
 let pairedDocumentOpened = false;
 /** True once the window-focus reconnect listener is registered (register only once). */
 let focusReconnectRegistered = false;
+/** The editor we last switched the active tab to, so we only switch when it changes. */
+let lastFocusedEditor: 'sch' | 'pcb' | null = null;
 
 /**
  * Reconnect when the EasyEDA window regains focus.
@@ -157,16 +159,20 @@ async function findEditorDocUuid(editorPrefix: 'sch' | 'pcb'): Promise<string | 
  * switch to it (the old code re-opened the *current* doc, so it never switched).
  */
 async function focusEditorTab(editorPrefix: 'sch' | 'pcb'): Promise<void> {
+	// Only switch when the requested editor differs from the one we last switched to.
+	// We track this ourselves instead of calling getCurrentDocumentInfo() because that
+	// call proved unreliable — it reported the schematic as "current" while the PCB
+	// canvas was actually active, so a schematic command got skipped and then failed.
+	if (lastFocusedEditor === editorPrefix) return;
 	try {
-		const docInfo = await eda.dmt_EditorControl.getCurrentDocumentInfo();
-		const dt = (docInfo as any)?.documentType;
-		if (editorPrefix === 'sch' && dt === 1) return;
-		if (editorPrefix === 'pcb' && dt === 3) return;
 		const targetUuid = await findEditorDocUuid(editorPrefix);
-		if (targetUuid) {
-			await eda.dmt_EditorControl.openDocument(targetUuid);
-		}
-	} catch { /* non-fatal */ }
+		if (!targetUuid) { lastFocusedEditor = null; return; }
+		await eda.dmt_EditorControl.openDocument(targetUuid);
+		// openDocument resolves before the canvas is interactive; wait briefly so the
+		// first canvas op after a switch doesn't fail with "editor not focused".
+		await new Promise((r) => setTimeout(r, 200));
+		lastFocusedEditor = editorPrefix;
+	} catch { lastFocusedEditor = null; }
 }
 
 // Wrap handlers with context-aware error messages and auto-focus
@@ -293,6 +299,7 @@ export function connectToMcpServer(extensionUuid: string): void {
 	stopHeartbeat();
 	activeExtensionUuid = extensionUuid;
 	setupFocusReconnect(extensionUuid);
+	lastFocusedEditor = null;
 
 	const WS_ID = getWsId();
 	let editorType = detectEditorType();
