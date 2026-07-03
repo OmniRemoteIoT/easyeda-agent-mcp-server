@@ -18,13 +18,13 @@ export function registerPourFillTools(server: McpServer, bridge: WebSocketBridge
 
 	server.tool(
 		'pcb_create_pour',
-		'Create a copper pour region on the PCB. The polygon should be a flat array like ["L", x1, y1, x2, y2, ..., x1, y1] where "L" indicates line segments.',
+		'Create a copper pour region on the PCB. Polygon format: START point first, THEN the "L" marker, then the remaining points — [x1, y1, "L", x2, y2, x3, y3, ..., x1, y1] (close by repeating the first point). Coordinates are in the PCB document unit (mil by default).',
 		{
 			net: z.string().describe('Net name for the pour'),
 			layer: z.string().describe('Layer name (e.g. "TopLayer", "BottomLayer", "InnerLayer1", "InnerLayer2")'),
 			polygon: z
 				.array(z.union([z.string(), z.number()]))
-				.describe('Polygon source array, e.g. ["L", x1, y1, x2, y2, ..., x1, y1]'),
+				.describe('Polygon source array — start point FIRST, then "L", then remaining points: [x1, y1, "L", x2, y2, ..., x1, y1]'),
 			pourFillMethod: z
 				.enum(['solid', '45grid', '90grid'])
 				.optional()
@@ -68,12 +68,12 @@ export function registerPourFillTools(server: McpServer, bridge: WebSocketBridge
 
 	server.tool(
 		'pcb_create_fill',
-		'Create a solid fill region on the PCB. The polygon should be a flat array like ["L", x1, y1, x2, y2, ..., x1, y1] where "L" indicates line segments.',
+		'Create a solid fill region on the PCB. Polygon format: START point first, THEN the "L" marker, then the remaining points — [x1, y1, "L", x2, y2, x3, y3, ..., x1, y1] (close by repeating the first point). Coordinates are in the PCB document unit (mil by default).',
 		{
 			layer: z.string().describe('Layer name (e.g. "TopLayer", "BottomLayer")'),
 			polygon: z
 				.array(z.union([z.string(), z.number()]))
-				.describe('Polygon source array, e.g. ["L", x1, y1, x2, y2, ..., x1, y1]'),
+				.describe('Polygon source array — start point FIRST, then "L", then remaining points: [x1, y1, "L", x2, y2, ..., x1, y1]'),
 			net: z.string().optional().describe('Net name to assign'),
 			fillMode: z.string().optional().describe('Fill mode'),
 			lineWidth: z.number().optional().describe('Line width'),

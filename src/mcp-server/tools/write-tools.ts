@@ -123,7 +123,7 @@ export function registerWriteTools(server: McpServer, bridge: WebSocketBridge): 
 			layer: z.string().describe('Layer name'),
 			polygon: z
 				.array(z.union([z.string(), z.number()]))
-				.describe('Polygon source array, e.g. ["L", x1, y1, x2, y2, ..., x1, y1]'),
+				.describe('Polygon source array — start point FIRST, then "L", then remaining points: [x1, y1, "L", x2, y2, ..., x1, y1]'),
 			ruleType: z.array(z.string()).optional().describe('Rule type(s) for the region'),
 			regionName: z.string().optional().describe('Name for the region'),
 			lineWidth: z.number().optional().describe('Outline width'),
