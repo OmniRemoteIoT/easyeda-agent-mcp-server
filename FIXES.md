@@ -34,8 +34,8 @@ port 15168). To hand it to another session: stop this session's easyeda-pro serv
 | 1.1.5 | `focusEditorTab` reliable single-board switch (tracked last editor) | ext | ✅ (single board) |
 | 1.1.6 | `sch_get_all_components`/`pcb_get_all_primitives` `compact:true` (~90% fewer tokens) | server | ✅ |
 | 1.1.6 | Correct pour/fill polygon format in docs: `[x1,y1,"L",x2,y2,...]` (start point FIRST) | server | ✅ |
-| 1.1.6 | `sch.component.delete` resolves via `getAll()` (schematic doc), not raw by-ID | ext | ⏳ needs live test |
-| **1.1.7** | **Multi-board fix (below)** | ext | ⏳ **needs live test** |
+| 1.1.6 | `sch.component.delete` resolves via `getAll()` (schematic doc), not raw by-ID | ext | ✅ |
+| **1.1.7** | **Multi-board fix (below)** | ext | ✅ **confirmed** — read-targeting + get/modify/create all work on the focused board |
 
 ## The blocking bug this fixes (v1.1.7)
 
