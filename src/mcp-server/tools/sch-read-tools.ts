@@ -2,10 +2,27 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import type { WebSocketBridge } from '../bridge';
 
+/** Strip the verbose per-component blob (datasheet, description, 3D transforms) to save tokens. */
+function toCompactSchComponents(result: unknown): unknown {
+	if (!Array.isArray(result)) return result;
+	return result.map((c: any) => ({
+		primitiveId: c?.primitiveId,
+		componentType: c?.componentType,
+		designator: c?.designator,
+		x: c?.x,
+		y: c?.y,
+		rotation: c?.rotation,
+		mirror: c?.mirror,
+		value: c?.otherProperty?.Value ?? c?.name,
+		supplierId: c?.supplierId,
+		footprint: c?.otherProperty?.Footprint ?? c?.otherProperty?.['Supplier Footprint'],
+	}));
+}
+
 export function registerSchReadTools(server: McpServer, bridge: WebSocketBridge): void {
 	server.tool(
 		'sch_get_all_components',
-		'Get all components in the schematic with their properties, positions, rotations, designators, etc.',
+		'Get all components in the schematic with their properties, positions, rotations, designators, etc. For large designs, pass compact:true to strip the verbose per-part property blob (datasheet, description, 3D transforms) and return only essentials — cuts token usage ~90%.',
 		{
 			componentType: z
 				.enum(['part', 'sheet', 'netflag', 'netport', 'nonElectrical_symbol', 'short_symbol', 'netlabel'])
@@ -15,10 +32,15 @@ export function registerSchReadTools(server: McpServer, bridge: WebSocketBridge)
 				.boolean()
 				.optional()
 				.describe('If true, get components from all schematic pages instead of just the current page'),
+			compact: z
+				.boolean()
+				.optional()
+				.describe('Return only essentials (primitiveId, designator, x, y, rotation, value, supplierId, footprint) to save tokens. Recommended for boards with many parts.'),
 		},
-		async ({ componentType, allSchematicPages }) => {
+		async ({ componentType, allSchematicPages, compact }) => {
 			const result = await bridge.send('sch.component.getAll', { componentType, allSchematicPages });
-			return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+			const out = compact ? toCompactSchComponents(result) : result;
+			return { content: [{ type: 'text', text: JSON.stringify(out, null, 2) }] };
 		},
 	);
 

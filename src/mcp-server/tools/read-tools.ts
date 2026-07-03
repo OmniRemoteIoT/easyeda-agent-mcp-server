@@ -38,19 +38,56 @@ const PRIMITIVE_TYPES = [
 	'region',
 ] as const;
 
+/**
+ * Strip the verbose per-primitive blob to save tokens. Components carry a large
+ * otherProperty object (datasheet, description, 3D transforms) + full pad detail;
+ * keep only essentials. Non-component primitives are already compact — just drop
+ * any otherProperty.
+ */
+function toCompactPcbPrimitives(result: unknown): unknown {
+	if (!Array.isArray(result)) return result;
+	return result.map((p: any) => {
+		if (p?.designator !== undefined || Array.isArray(p?.pads)) {
+			return {
+				primitiveId: p?.primitiveId,
+				primitiveType: p?.primitiveType,
+				designator: p?.designator,
+				layer: p?.layer,
+				x: p?.x,
+				y: p?.y,
+				rotation: p?.rotation,
+				value: p?.otherProperty?.Value ?? p?.name,
+				supplierId: p?.supplierId,
+				footprint: p?.otherProperty?.Footprint,
+				pads: Array.isArray(p?.pads)
+					? p.pads.map((pad: any) => ({ padNumber: pad?.padNumber, net: pad?.net }))
+					: undefined,
+			};
+		}
+		const { otherProperty, ...rest } = p ?? {};
+		return rest;
+	});
+}
+
 export function registerReadTools(server: McpServer, bridge: WebSocketBridge): void {
 	server.tool(
 		'pcb_get_all_primitives',
 		`Get all primitives of a specific type on the PCB, with optional filters.
-Filters by type: component(layer), track/polyline/arc(net,layer), via(net), pad(layer,net), pour/fill(layer,net), region(layer)`,
+Filters by type: component(layer), track/polyline/arc(net,layer), via(net), pad(layer,net), pour/fill(layer,net), region(layer).
+For large boards, pass compact:true to strip the verbose per-component property blob and return essentials — cuts token usage ~90%.`,
 		{
 			type: z.enum(PRIMITIVE_TYPES).describe('Primitive type to query'),
 			net: z.string().optional().describe('Filter by net name'),
 			layer: z.string().optional().describe('Filter by layer (e.g. "TopLayer", "BottomLayer")'),
+			compact: z
+				.boolean()
+				.optional()
+				.describe('Strip verbose fields (otherProperty; compact pad list) to save tokens. Recommended for boards with many parts.'),
 		},
-		async ({ type, net, layer }) => {
+		async ({ type, net, layer, compact }) => {
 			const result = await bridge.send(GET_ALL_HANDLER_MAP[type], { net, layer });
-			return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+			const out = compact ? toCompactPcbPrimitives(result) : result;
+			return { content: [{ type: 'text', text: JSON.stringify(out, null, 2) }] };
 		},
 	);
 
