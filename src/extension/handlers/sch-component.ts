@@ -35,7 +35,18 @@ export const schComponentHandlers: Record<string, (params: Record<string, any>) 
 	},
 
 	'sch.component.delete': async (params) => {
-		return eda.sch_PrimitiveComponent.delete(params.ids);
+		// Resolve IDs to component OBJECTS via getAll() (which walks the active schematic
+		// document) instead of passing raw string IDs to delete(). The by-ID path can
+		// resolve through the PCB canvas registry and fail with "object not initialized
+		// in PCB canvas" when no PCB is open. Passing the resolved objects avoids that.
+		const ids: string[] = Array.isArray(params.ids) ? params.ids : [params.ids];
+		const all = await eda.sch_PrimitiveComponent.getAll();
+		const targets = all.filter((c: any) => ids.includes(c.getState_PrimitiveId?.()));
+		if (targets.length === 0) {
+			// Fall back to raw delete so an unusual ID still gets a chance.
+			return eda.sch_PrimitiveComponent.delete(params.ids);
+		}
+		return eda.sch_PrimitiveComponent.delete(targets);
 	},
 
 	'sch.component.modify': async (params) => {
