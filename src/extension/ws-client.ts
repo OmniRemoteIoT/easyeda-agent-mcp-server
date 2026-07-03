@@ -80,8 +80,6 @@ let lastMessageAt = 0;
 let pairedDocumentOpened = false;
 /** True once the window-focus reconnect listener is registered (register only once). */
 let focusReconnectRegistered = false;
-/** The editor we last switched the active tab to, so we only switch when it changes. */
-let lastFocusedEditor: 'sch' | 'pcb' | null = null;
 
 /**
  * Reconnect when the EasyEDA window regains focus.
@@ -149,30 +147,56 @@ async function findEditorDocUuid(editorPrefix: 'sch' | 'pcb'): Promise<string | 
 }
 
 /**
- * Make the schematic/PCB the ACTIVE editor before running a command, so a single
- * connection can drive both editors (switch tabs per command instead of needing a
- * separate connection per editor). EDA Pro targets canvas ops at the active document.
+ * Given the currently-focused document UUID, find the paired document (schematic
+ * page or PCB) of the SAME board. Lets a schematic↔PCB toggle stay on the board the
+ * user is actually working on, instead of jumping to the first board in the project.
+ */
+async function findPairedDocUuid(currentDocUuid: string | undefined, editorPrefix: 'sch' | 'pcb'): Promise<string | undefined> {
+	if (!currentDocUuid) return undefined;
+	try {
+		const project = await eda.dmt_Project.getCurrentProjectInfo();
+		if (!project?.data) return undefined;
+		for (const item of project.data) {
+			const t = String((item as any).itemType || '').toUpperCase();
+			if (t !== 'BOARD') continue;
+			const board = item as any;
+			const schPages: any[] = board.schematic?.page ?? [];
+			const pcbUuid: string | undefined = board.pcb?.uuid;
+			const belongsToThisBoard = pcbUuid === currentDocUuid || schPages.some((p) => p?.uuid === currentDocUuid);
+			if (belongsToThisBoard) {
+				return editorPrefix === 'pcb' ? pcbUuid : schPages[0]?.uuid;
+			}
+		}
+	} catch { /* non-fatal */ }
+	return undefined;
+}
+
+/**
+ * Ensure the correct KIND of editor (schematic vs PCB) is active before a command,
+ * so one connection can drive both — WITHOUT hijacking a multi-board project.
  *
- * documentType: 1 = SCHEMATIC_PAGE, 3 = PCB (EDMT_EditorDocumentType). If the wanted
- * editor is already active, do nothing — re-opening on every command thrashed the
- * editor and dropped the WebSocket. Otherwise open the target editor's document to
- * switch to it (the old code re-opened the *current* doc, so it never switched).
+ * documentType: 1 = SCHEMATIC_PAGE, 3 = PCB (EDMT_EditorDocumentType).
+ * - If the focused tab is already the right editor type, DO NOTHING. This is critical:
+ *   the user may have any board's schematic focused; force-switching to the first
+ *   board's schematic (the old behavior) read/wrote the wrong board and yanked the UI.
+ * - Only when the focused tab is the WRONG type do we switch — preferring the paired
+ *   document of the current board, falling back to the first board's matching doc.
  */
 async function focusEditorTab(editorPrefix: 'sch' | 'pcb'): Promise<void> {
-	// Only switch when the requested editor differs from the one we last switched to.
-	// We track this ourselves instead of calling getCurrentDocumentInfo() because that
-	// call proved unreliable — it reported the schematic as "current" while the PCB
-	// canvas was actually active, so a schematic command got skipped and then failed.
-	if (lastFocusedEditor === editorPrefix) return;
 	try {
-		const targetUuid = await findEditorDocUuid(editorPrefix);
-		if (!targetUuid) { lastFocusedEditor = null; return; }
-		await eda.dmt_EditorControl.openDocument(targetUuid);
-		// openDocument resolves before the canvas is interactive; wait briefly so the
-		// first canvas op after a switch doesn't fail with "editor not focused".
-		await new Promise((r) => setTimeout(r, 200));
-		lastFocusedEditor = editorPrefix;
-	} catch { lastFocusedEditor = null; }
+		const docInfo = await eda.dmt_EditorControl.getCurrentDocumentInfo();
+		const dt = (docInfo as any)?.documentType;
+		if (editorPrefix === 'sch' && dt === 1) return; // already on a schematic — respect it
+		if (editorPrefix === 'pcb' && dt === 3) return; // already on a PCB — respect it
+		const targetUuid =
+			(await findPairedDocUuid((docInfo as any)?.uuid, editorPrefix)) ??
+			(await findEditorDocUuid(editorPrefix));
+		if (targetUuid) {
+			await eda.dmt_EditorControl.openDocument(targetUuid);
+			// openDocument resolves before the canvas is interactive; wait briefly.
+			await new Promise((r) => setTimeout(r, 200));
+		}
+	} catch { /* non-fatal */ }
 }
 
 // Wrap handlers with context-aware error messages and auto-focus
@@ -299,7 +323,6 @@ export function connectToMcpServer(extensionUuid: string): void {
 	stopHeartbeat();
 	activeExtensionUuid = extensionUuid;
 	setupFocusReconnect(extensionUuid);
-	lastFocusedEditor = null;
 
 	const WS_ID = getWsId();
 	let editorType = detectEditorType();
