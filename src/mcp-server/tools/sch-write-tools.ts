@@ -1,6 +1,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import type { WebSocketBridge } from '../bridge';
+import { textResult } from './util';
 
 export function registerSchWriteTools(server: McpServer, bridge: WebSocketBridge): void {
 	server.tool(
@@ -199,7 +200,7 @@ export function registerSchWriteTools(server: McpServer, bridge: WebSocketBridge
 
 	server.tool(
 		'sch_set_netlist',
-		'Update the schematic netlist — the programmatic way to define electrical connectivity (since drawn wires do not auto-connect via the API). Provide a netlist string in the given format (round-trip a known-good one from sch_get_netlist to learn the exact format, then edit the net membership). type should match the netlist string format.',
+		'Update the schematic netlist. NOTE: this wraps EasyEDA Pro\'s @beta sch_Netlist.setNetlist API, which returns no value and — as of current EDA Pro builds — frequently does NOT persist (the submitted nets do not appear on read-back). This tool now reads the netlist back after writing and reports `changed` so a silent no-op is visible; if `changed` is false, fall back to native EDA Pro File → Import Netlist. Provide a netlist string in the given format (round-trip a known-good one from sch_get_netlist to learn the exact format, then edit the net membership). type should match the netlist string format.',
 		{
 			type: z
 				.enum(['Allegro', 'PADS', 'Protel2', 'JLCEDA', 'EasyEDA', 'DISA'])
@@ -208,8 +209,31 @@ export function registerSchWriteTools(server: McpServer, bridge: WebSocketBridge
 			netlist: z.string().describe('Netlist data string (same format as sch_get_netlist output)'),
 		},
 		async ({ type, netlist }) => {
-			const result = await bridge.send('sch.netlist.set', { type, netlist });
-			return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+			// EDA Pro's setNetlist is @beta and returns void — no success signal, and it
+			// often no-ops. Snapshot the netlist before/after so we can report honestly
+			// whether the write actually landed instead of returning an unwrappable void.
+			let before: unknown;
+			try {
+				before = await bridge.send('sch.netlist.get', { type });
+			} catch {
+				before = undefined;
+			}
+			await bridge.send('sch.netlist.set', { type, netlist });
+			let after: unknown;
+			try {
+				after = await bridge.send('sch.netlist.get', { type });
+			} catch {
+				after = undefined;
+			}
+			const readBackAvailable = typeof after === 'string';
+			const changed = readBackAvailable ? after !== before : null;
+			const note =
+				changed === false
+					? 'setNetlist did not change the schematic netlist (read-back is identical). This is a known limitation of EDA Pro\'s @beta setNetlist — the write did not persist. To establish connectivity programmatically, apply the netlist to the PCB instead via pcb_set_netlist (PCB_Net.setNetlist is a @public API that returns a real success flag); otherwise fall back to native File → Import Netlist in EasyEDA Pro.'
+					: changed === true
+						? 'Netlist changed on read-back — the write landed.'
+						: 'Netlist submitted; read-back verification unavailable (could not re-read the netlist).';
+			return textResult({ submitted: true, changed, note });
 		},
 	);
 

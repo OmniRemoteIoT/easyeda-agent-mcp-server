@@ -117,6 +117,21 @@ For large boards, pass compact:true to strip the verbose per-component property 
 	);
 
 	server.tool(
+		'pcb_get_netlist',
+		'Get the PCB netlist (net-to-pad assignments) in the specified format. Counterpart to sch_get_netlist but reads the PCB\'s own net model. Round-trip a known-good one to learn the exact dialect, then edit membership and apply with pcb_set_netlist.',
+		{
+			type: z
+				.enum(['Allegro', 'PADS', 'Protel2', 'JLCEDA', 'EasyEDA', 'DISA'])
+				.optional()
+				.describe('Netlist format type'),
+		},
+		async ({ type }) => {
+			const result = await bridge.send('pcb.net.getNetlist', { type });
+			return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+		},
+	);
+
+	server.tool(
 		'pcb_get_net_primitives',
 		'Get all primitives (tracks, pads, vias, etc.) belonging to a specific net',
 		{

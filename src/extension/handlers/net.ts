@@ -18,4 +18,16 @@ export const netHandlers: Record<string, (params: Record<string, any>) => Promis
 	'pcb.net.select': async (params) => {
 		return eda.pcb_Net.selectNet(params.net);
 	},
+
+	// PCB-side netlist read/write. Unlike sch_Netlist.setNetlist (@beta, returns void,
+	// no-ops on current builds), PCB_Net.setNetlist is @public and returns a boolean
+	// success flag — a genuine programmatic path to apply connectivity/net assignments
+	// to the placed footprints (by designator-pin, like native Import Netlist).
+	'pcb.net.getNetlist': async (params) => {
+		return eda.pcb_Net.getNetlist(params.type);
+	},
+
+	'pcb.net.setNetlist': async (params) => {
+		return eda.pcb_Net.setNetlist(params.type, params.netlist);
+	},
 };

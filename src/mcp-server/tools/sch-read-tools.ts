@@ -1,6 +1,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import type { WebSocketBridge } from '../bridge';
+import { textResult } from './util';
 
 /** Strip the verbose per-component blob (datasheet, description, 3D transforms) to save tokens. */
 function toCompactSchComponents(result: unknown): unknown {
@@ -54,7 +55,10 @@ export function registerSchReadTools(server: McpServer, bridge: WebSocketBridge)
 		},
 		async ({ primitiveIds }) => {
 			const result = await bridge.send('sch.component.get', { primitiveIds });
-			return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+			// Single-id lookups return `undefined` when no component matches (IDs shift
+			// across reloads). textResult() serializes that to a well-formed "null" instead
+			// of emitting `text: undefined`, which the MCP SDK rejects.
+			return textResult(result ?? { found: false, primitiveIds });
 		},
 	);
 

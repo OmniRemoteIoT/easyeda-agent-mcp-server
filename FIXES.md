@@ -19,7 +19,7 @@ port 15168). To hand it to another session: stop this session's easyeda-pro serv
 (`/mcp` disable, or kill the process); the other session's server auto-binds within ~5s
 (retry loop); then **Claude → Connect Claude** (or focus the window) in EasyEDA.
 
-## Current build: v1.1.7
+## Current build: v1.1.8
 
 | Ver | Change | Side | Verified |
 |-----|--------|------|----------|
@@ -36,6 +36,9 @@ port 15168). To hand it to another session: stop this session's easyeda-pro serv
 | 1.1.6 | Correct pour/fill polygon format in docs: `[x1,y1,"L",x2,y2,...]` (start point FIRST) | server | ✅ |
 | 1.1.6 | `sch.component.delete` resolves via `getAll()` (schematic doc), not raw by-ID | ext | ✅ |
 | **1.1.7** | **Multi-board fix (below)** | ext | ✅ **confirmed** — read-targeting + get/modify/create all work on the focused board |
+| 1.1.7 | **Malformed-envelope fix**: `sch_set_netlist` + single-id `sch_get_component` returned `text: undefined` (`JSON.stringify(undefined)` is not a string) → MCP `-32602 invalid result`. New `textResult()` helper always emits a string; single-id miss returns `{found:false}` | server | ⏳ reconnect to verify |
+| 1.1.7 | `sch_set_netlist` now reads the netlist back and reports `changed` — exposes EDA Pro's @beta setNetlist silently no-op'ing instead of returning a bad void | server | ⏳ reconnect to verify |
+| **1.1.8** | **Connectivity unblock (below)**: new `pcb_set_netlist` / `pcb_get_netlist` wrap `PCB_Net.setNetlist` — a **@public** API returning a real `boolean` (vs the schematic's dead `@beta` void). Applies a netlist to the placed footprints by designator-pin, building the ratsnest. Reports `applied` (API bool) + `changed` (read-back) | ext + server | ⏳ needs live EDA Pro to verify |
 
 ## The blocking bug this fixes (v1.1.7)
 
@@ -79,10 +82,43 @@ the active board — flag it and the MCP-dev session will debug live.
 | Iris Wand PRO (old 87-part; what reads wrongly returned) | `5c403a28…` | `7e33f343…` |
 | Iris Wand LITE (old) | `d6788341…` | `872b9baf…` |
 
+## Connectivity: `sch_set_netlist` is dead, but `pcb_set_netlist` is a live path (v1.1.8)
+
+The MCP_WRITE_BUG_REPORT asked to rule out 5 alternative connectivity paths before
+closing Defect 2. Result of walking `@jlceda/pro-api-types` (v0.1.156):
+
+| # | Alt-path proposed | Verdict from SDK types |
+|---|-------------------|------------------------|
+| 1 | `SCH_Document.importChanges()` ingests a netlist/ECO | **Dead.** Signature is `importChanges(): Promise<boolean>` — takes **no args** and pulls **from PCB** (「从 PCB 导入变更」). It cannot accept a netlist. |
+| 2 | Invoke native *File → Import Netlist* command programmatically | **Dead.** `SYS_HeaderMenu` only inserts/removes/replaces the *extension's own* menus; `SYS_ShortcutKey` only registers *extension* shortcuts; `SCH_Utils` exposes only `splitLines`. No command-id / menu-execute API. |
+| 3 | API wires/flags promote to nets after save + reload | **Untested** (needs live EDA Pro) — but moot given path #6. |
+| 4 | Lower-level net-model write (`SCH_Net.rebuild()`) | **Dead.** There is **no `SCH_Net` class** (only `PCB_Net`). `SCH_PrimitivePin` has no net-name state. The only schematic net API is `SCH_Netlist` {getNetlist @public, setNetlist @beta void}. No rebuild/refresh. |
+| 5 | `setNetlist` preconditions (save-first / commit) | Return type is `Promise<void>` — no success signal regardless; not worth chasing on the sch side given #6. |
+| **6** | **(new) Apply the netlist to the PCB instead** | **LIVE LEAD.** `PCB_Net.setNetlist(type, netlist)` is **`@public`** and returns **`Promise<boolean>`** — a real, non-beta path with a success flag. Now exposed as `pcb_set_netlist`. |
+
+**So the schematic net model has no working programmatic writer, but the PCB one does.**
+For a fully-placed design whose goal is PCB layout, apply the 68-net Protel2 netlist
+directly to the PCB with `pcb_set_netlist` (footprints must be on the PCB first — via
+`pcb_import` from the schematic, or the netlist's own `[components]` blocks). This
+builds the net model + ratsnest and satisfies forward-tests C/D directly, bypassing the
+dead `sch_set_netlist`. **This is unverified live** (no EDA Pro connection this session) —
+run the acceptance test below when connected.
+
+### Verify `pcb_set_netlist` (do after re-import + restart, PCB tab focused)
+1. `pcb_get_netlist(Protel2)` → snapshot current PCB nets.
+2. `pcb_set_netlist(Protel2, wand_full.protel2.txt)` → expect `{applied:true, changed:true}`.
+3. `pcb_get_all_nets` → lists GND/+3V3/VBAT/… (the 68).
+4. If `applied:false`, footprints likely aren't placed / designators don't match — run
+   `pcb_import` first, or the dialect doesn't match `type`.
+
 ## Known EasyEDA-API limits (documented, not fixable in the server)
 
-- API-drawn wires / net flags do **not** form electrical nets — use `sch_set_netlist`
-  for programmatic connectivity (no connectivity-rebuild API exists).
+- API-drawn wires / net flags do **not** form electrical nets, and **schematic**
+  `sch_set_netlist` (EDA Pro's `sch_Netlist.setNetlist`, `@beta`, returns `void`)
+  **frequently no-ops**. Our tool snapshots before/after and returns `changed`; when
+  `changed:false`, there is no **schematic-side** connectivity writer — establish
+  connectivity on the **PCB** via `pcb_set_netlist` (see above) or use native
+  **File → Import Netlist**.
 - `pcb_import_changes` opens a modal and returns before applying — user must click
   "Apply Changes".
 - PCB primitive coordinates/sizes are in the document display unit (**mil** by default).

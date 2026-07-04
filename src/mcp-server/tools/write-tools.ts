@@ -1,6 +1,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import type { WebSocketBridge } from '../bridge';
+import { textResult } from './util';
 
 const DELETE_HANDLER_MAP: Record<string, string> = {
 	component: 'pcb.delete.component',
@@ -215,6 +216,48 @@ All types support: primitiveLock`,
 		async ({ type, ids }) => {
 			const result = await bridge.send(DELETE_HANDLER_MAP[type], { ids });
 			return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+		},
+	);
+
+	// === Netlist ===
+
+	server.tool(
+		'pcb_set_netlist',
+		'Apply a netlist to the PCB (assign nets to the placed footprints\' pads by designator-pin, building the ratsnest). This wraps EDA Pro\'s PCB_Net.setNetlist, which — unlike the schematic\'s @beta sch_set_netlist — is a @public API that returns a real boolean success flag. This is the recommended programmatic path to establish connectivity on the PCB when sch_set_netlist no-ops: place footprints first (via pcb_import from the schematic or manually), then feed the full [components]+(nets) netlist here. The tool reports the API\'s boolean (`applied`) plus a before/after read-back (`changed`) so a silent no-op is visible. If applied/changed are false, fall back to native File → Import Netlist. type must match the netlist string format.',
+		{
+			type: z
+				.enum(['Allegro', 'PADS', 'Protel2', 'JLCEDA', 'EasyEDA', 'DISA'])
+				.optional()
+				.describe('Netlist format type (must match the netlist string)'),
+			netlist: z.string().describe('Netlist data string (same format as pcb_get_netlist / sch_get_netlist output)'),
+		},
+		async ({ type, netlist }) => {
+			// Snapshot before/after and also capture the API's own boolean so a silent
+			// no-op is distinguishable from a real apply.
+			let before: unknown;
+			try {
+				before = await bridge.send('pcb.net.getNetlist', { type });
+			} catch {
+				before = undefined;
+			}
+			const applied = await bridge.send('pcb.net.setNetlist', { type, netlist });
+			let after: unknown;
+			try {
+				after = await bridge.send('pcb.net.getNetlist', { type });
+			} catch {
+				after = undefined;
+			}
+			const readBackAvailable = typeof after === 'string';
+			const changed = readBackAvailable ? after !== before : null;
+			const note =
+				applied === false
+					? 'PCB_Net.setNetlist returned false — the write was rejected (check that footprints are placed with matching designators, and the netlist dialect matches `type`). Fall back to native File → Import Netlist.'
+					: changed === false
+						? 'setNetlist returned truthy but the PCB netlist is unchanged on read-back — verify the netlist actually differs from the current one, or fall back to native File → Import Netlist.'
+						: changed === true
+							? 'Netlist applied — PCB net model changed on read-back.'
+							: 'Netlist submitted; read-back verification unavailable (could not re-read the PCB netlist).';
+			return textResult({ submitted: true, applied, changed, note });
 		},
 	);
 
