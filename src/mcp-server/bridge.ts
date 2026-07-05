@@ -64,6 +64,11 @@ export class WebSocketBridge {
 	/** Pending EADDRINUSE rebind timer, if any. */
 	private retryTimer: ReturnType<typeof setTimeout> | null = null;
 	private stopped = false;
+	/**
+	 * Called when another (newer) MCP server asks to take over the port.
+	 * The owner should shut down and exit so the newcomer can bind. Set by index.ts.
+	 */
+	onTakeover: (() => void) | null = null;
 
 	constructor(private readonly port: number = 15168, timeout = 120000, maxConcurrent = 3) {
 		this.timeout = timeout;
@@ -109,8 +114,12 @@ export class WebSocketBridge {
 						// then keep trying to claim the port in the background.
 						resolveOnce();
 						try { wss.close(); } catch { /* ignore */ }
+						// Actively evict the incumbent (likely an orphaned older session)
+						// so this newer session can take over the bridge, instead of
+						// waiting for it to exit on its own. Latest session wins.
+						this.requestTakeover();
 						if (this.retryTimer) clearTimeout(this.retryTimer);
-						this.retryTimer = setTimeout(attemptListen, 5000);
+						this.retryTimer = setTimeout(attemptListen, 1500);
 					} else {
 						console.error(`[Bridge] WebSocket Server error:`, err);
 						// Non-fatal: keep the MCP layer alive rather than exiting.
@@ -123,6 +132,28 @@ export class WebSocketBridge {
 
 			attemptListen();
 		});
+	}
+
+	/**
+	 * Ask whoever currently owns the port to relinquish it. We connect to the
+	 * incumbent bridge as a client and send a `takeover` control message; a
+	 * takeover-aware owner will shut itself down and free the port for us to bind.
+	 * Best-effort and non-fatal: if the owner is gone or an old version, the
+	 * background rebind retry still eventually succeeds.
+	 */
+	private requestTakeover(): void {
+		if (this.stopped) return;
+		try {
+			const client = new WebSocket(`ws://localhost:${this.port}`);
+			client.on('open', () => {
+				try {
+					client.send(JSON.stringify({ type: 'takeover', pid: process.pid }));
+				} catch { /* ignore */ }
+				// Give the incumbent a moment to act, then close our probe socket.
+				setTimeout(() => { try { client.close(); } catch { /* ignore */ } }, 300);
+			});
+			client.on('error', () => { /* incumbent may already be gone — the rebind retry handles it */ });
+		} catch { /* ignore */ }
 	}
 
 	private handleConnection(ws: WebSocket): void {
@@ -146,6 +177,18 @@ export class WebSocketBridge {
 		ws.on('message', (data) => {
 			try {
 				const raw = JSON.parse(data.toString());
+				// A newer MCP server (another Claude session) is asking us to
+				// relinquish the port. Hand it off by shutting ourselves down.
+				if (raw.type === 'takeover') {
+					console.error(`[Bridge] Takeover requested by a newer MCP session (pid ${raw.pid ?? '?'}) — relinquishing port ${this.port}.`);
+					if (this.onTakeover) {
+						this.onTakeover();
+					} else {
+						// No handler wired up — at least free the port so the newcomer can bind.
+						void this.stop();
+					}
+					return;
+				}
 				// Handle identify messages from the extension
 				if (raw.type === 'identify' && raw.editorType) {
 					const session = this.clientSession.get(ws);

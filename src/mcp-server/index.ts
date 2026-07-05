@@ -184,15 +184,30 @@ Returns the project name, document UUIDs, and split-screen arrangement.`,
 	console.error('[MCP] EasyEDA Agent MCP Server started');
 	console.error(`[MCP] WebSocket Server on port ${WS_PORT}, waiting for EDA Pro Extension...`);
 
-	process.on('SIGINT', async () => {
-		await bridge.stop();
+	// Shut down cleanly once, no matter how the exit is triggered.
+	let shuttingDown = false;
+	const shutdown = async (reason: string) => {
+		if (shuttingDown) return;
+		shuttingDown = true;
+		console.error(`[MCP] Shutting down (${reason})`);
+		try { await bridge.stop(); } catch { /* ignore */ }
 		process.exit(0);
-	});
+	};
 
-	process.on('SIGTERM', async () => {
-		await bridge.stop();
-		process.exit(0);
-	});
+	// When a newer Claude session wants the port, relinquish it so it can take over.
+	bridge.onTakeover = () => { void shutdown('takeover by newer session'); };
+
+	process.on('SIGINT', () => void shutdown('SIGINT'));
+	process.on('SIGTERM', () => void shutdown('SIGTERM'));
+
+	// The MCP client (Claude session) talks to us over stdio. When the session
+	// ends, Claude closes our stdin — but the WebSocket server + ping intervals
+	// keep the event loop alive, so the process would otherwise orphan and keep
+	// holding port 15168. Exit when stdin closes so the server dies WITH the
+	// session and the port frees for the next one.
+	transport.onclose = () => void shutdown('stdio transport closed');
+	process.stdin.on('end', () => void shutdown('stdin end'));
+	process.stdin.on('close', () => void shutdown('stdin close'));
 }
 
 main().catch((err) => {

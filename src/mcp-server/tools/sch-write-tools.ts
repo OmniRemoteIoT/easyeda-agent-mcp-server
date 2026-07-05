@@ -1,7 +1,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import type { WebSocketBridge } from '../bridge';
-import { textResult } from './util';
+import { textResult, resolveNetlistInput } from './util';
 
 export function registerSchWriteTools(server: McpServer, bridge: WebSocketBridge): void {
 	server.tool(
@@ -200,15 +200,28 @@ export function registerSchWriteTools(server: McpServer, bridge: WebSocketBridge
 
 	server.tool(
 		'sch_set_netlist',
-		'Update the schematic netlist. NOTE: this wraps EasyEDA Pro\'s @beta sch_Netlist.setNetlist API, which returns no value and — as of current EDA Pro builds — frequently does NOT persist (the submitted nets do not appear on read-back). This tool now reads the netlist back after writing and reports `changed` so a silent no-op is visible; if `changed` is false, fall back to native EDA Pro File → Import Netlist. Provide a netlist string in the given format (round-trip a known-good one from sch_get_netlist to learn the exact format, then edit the net membership). type should match the netlist string format.',
+		'Update the schematic netlist. NOTE: this wraps EasyEDA Pro\'s @beta sch_Netlist.setNetlist API, which returns no value and — as of current EDA Pro builds — frequently does NOT persist (the submitted nets do not appear on read-back). This tool now reads the netlist back after writing and reports `changed` so a silent no-op is visible; if `changed` is false, apply the netlist to the PCB via pcb_set_netlist instead, or fall back to native EDA Pro File → Import Netlist. Provide the netlist EITHER inline via `netlist` OR via `path` (the server reads the file from disk, avoiding the model output-token limit and preserving CRLF exactly). Round-trip a known-good one from sch_get_netlist to learn the exact format. type should match the netlist string format.',
 		{
 			type: z
 				.enum(['Allegro', 'PADS', 'Protel2', 'JLCEDA', 'EasyEDA', 'DISA'])
 				.optional()
 				.describe('Netlist format type (must match the netlist string)'),
-			netlist: z.string().describe('Netlist data string (same format as sch_get_netlist output)'),
+			netlist: z
+				.string()
+				.optional()
+				.describe('Netlist data string (same format as sch_get_netlist output). Provide EITHER this OR `path`.'),
+			path: z
+				.string()
+				.optional()
+				.describe('Absolute filesystem path to a netlist file the SERVER reads directly from disk (CRLF preserved, zero token cost). Preferred for real boards. Provide EITHER this OR `netlist`.'),
 		},
-		async ({ type, netlist }) => {
+		async ({ type, netlist: netlistArg, path }) => {
+			let netlist: string;
+			try {
+				netlist = resolveNetlistInput(netlistArg, path);
+			} catch (err) {
+				return textResult({ submitted: false, error: String((err as Error)?.message ?? err) });
+			}
 			// EDA Pro's setNetlist is @beta and returns void — no success signal, and it
 			// often no-ops. Snapshot the netlist before/after so we can report honestly
 			// whether the write actually landed instead of returning an unwrappable void.

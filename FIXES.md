@@ -15,11 +15,14 @@ Extension changes ship in the `.eext`; server changes ship in `dist/`.
   reconnect easyeda-pro in Claude Code (restarts `node dist/mcp-server/index.js`).
 
 Only **one** Claude session can own the EasyEDA bridge (extension connects out to fixed
-port 15168). To hand it to another session: stop this session's easyeda-pro server
-(`/mcp` disable, or kill the process); the other session's server auto-binds within ~5s
-(retry loop); then **Claude → Connect Claude** (or focus the window) in EasyEDA.
+port 15168). As of **v1.2.0** this is self-healing: a session's server exits when the
+session ends (frees the port), and a newer session **evicts** an older one automatically
+(takeover handshake). To hand the bridge to another session, just start/reconnect
+easyeda-pro there — it takes over within ~1.5s; the extension re-attaches on its
+staleness check (~25s) or immediately on EasyEDA window focus. Manual eviction
+(`/mcp` disable / kill) is no longer required. See v1.2.0 below.
 
-## Current build: v1.1.8
+## Current build: v1.2.1
 
 | Ver | Change | Side | Verified |
 |-----|--------|------|----------|
@@ -39,6 +42,9 @@ port 15168). To hand it to another session: stop this session's easyeda-pro serv
 | 1.1.7 | **Malformed-envelope fix**: `sch_set_netlist` + single-id `sch_get_component` returned `text: undefined` (`JSON.stringify(undefined)` is not a string) → MCP `-32602 invalid result`. New `textResult()` helper always emits a string; single-id miss returns `{found:false}` | server | ⏳ reconnect to verify |
 | 1.1.7 | `sch_set_netlist` now reads the netlist back and reports `changed` — exposes EDA Pro's @beta setNetlist silently no-op'ing instead of returning a bad void | server | ⏳ reconnect to verify |
 | **1.1.8** | **Connectivity unblock (below)**: new `pcb_set_netlist` / `pcb_get_netlist` wrap `PCB_Net.setNetlist` — a **@public** API returning a real `boolean` (vs the schematic's dead `@beta` void). Applies a netlist to the placed footprints by designator-pin, building the ratsnest. Reports `applied` (API bool) + `changed` (read-back) | ext + server | ⏳ needs live EDA Pro to verify |
+| **1.1.9** | **File-path netlist ingestion (below)**: `pcb_set_netlist` + `sch_set_netlist` now take an optional `path` (mutually exclusive with `netlist`). The **server** reads the file from disk, so a real ~150 KB / 68-net board's netlist no longer has to be emitted inline by the model (which blew the output-token limit) and its **CRLF is preserved byte-for-byte** (inline JSON tool args normalize `\r\n`→`\n`, corrupting Protel2). Pure server-side change — no `.eext` re-import | server | ✅ helper unit-tested; ⏳ needs live EDA Pro end-to-end |
+| **1.2.0** | **Session lifecycle & takeover (below)**: server now exits when the Claude session ends (`stdin` EOF / `transport.onclose`), so it no longer orphans and squats on port 15168; and a newer session **evicts** an incumbent via a `takeover` handshake instead of waiting on the passive rebind loop. Fixes the "MCP won't disconnect / can't take over" problem — no more manual PID hunting. Pure server-side change — no `.eext` re-import | server | ✅ takeover + stdin-exit verified end-to-end (real pipe) |
+| **1.2.1** | **Easier netmapping (below)**: new **`pcb_apply_netlist`** — one call that runs `pcb_import_changes` (schematic→PCB, so the footprints exist) then `PCB_Net.setNetlist`, the whole connectivity flow in one shot. Both it and `pcb_set_netlist` now run a **preflight** (footprint count on the PCB + netlist component/net counts + designator cross-check) so a failed apply says *why* — "PCB has 0 footprints, run the import first" or "designators U3/U4 aren't on the PCB" — instead of an opaque `applied:false`. Parser `parseNetlistSummary` validated against the real 113-part/68-net `wand_full.protel2.txt`. Pure server-side change — no `.eext` re-import | server | ✅ parser verified vs real board file; ⏳ needs live EDA Pro end-to-end |
 
 ## The blocking bug this fixes (v1.1.7)
 
@@ -106,10 +112,123 @@ run the acceptance test below when connected.
 
 ### Verify `pcb_set_netlist` (do after re-import + restart, PCB tab focused)
 1. `pcb_get_netlist(Protel2)` → snapshot current PCB nets.
-2. `pcb_set_netlist(Protel2, wand_full.protel2.txt)` → expect `{applied:true, changed:true}`.
+2. `pcb_set_netlist(Protel2, path="…/Hardware/wand_full.protel2.txt")` → expect `{applied:true, changed:true}`. (Use `path`, not inline — see v1.1.9 below.)
 3. `pcb_get_all_nets` → lists GND/+3V3/VBAT/… (the 68).
 4. If `applied:false`, footprints likely aren't placed / designators don't match — run
    `pcb_import` first, or the dialect doesn't match `type`.
+
+## The transport fix: file-path netlist ingestion (v1.1.9)
+
+`CONNECTIVITY_SOLUTION_BRIEF.md` §3 identified that even with `pcb_set_netlist` working,
+**the netlist could not travel through an inline MCP tool argument**, for two independent
+reasons:
+
+1. **Output-token limit.** A ~150 KB netlist (≈40K tokens) must be emitted *inline* by
+   the model as it generates the tool call — it hits the per-response output ceiling
+   mid-argument. The file can't be produced as an argument at all.
+2. **CRLF corruption.** `sch_get_netlist(Protel2)` round-trips **CRLF** (`\r\n`). When the
+   model emits the argument as a JSON string, newlines normalize to **LF** (`\n`) — CRLF
+   is lost before the payload reaches the API.
+
+**Fix:** both `pcb_set_netlist` and `sch_set_netlist` now accept an optional **`path`**
+(mutually exclusive with `netlist`). When `path` is given, the **Node server** reads the
+file from disk itself (`resolveNetlistInput` in `tools/util.ts`) and passes the exact bytes
+over the WebSocket bridge — JSON-over-WS preserves `\r\n`. The model passes a ~40-char path,
+not 150 KB, so **both the token limit and the CRLF loss are sidestepped**. `~` is expanded;
+relative paths resolve against the server cwd (absolute preferred). Exactly one of
+`netlist`/`path` is required; missing/unreadable files return a clear `{submitted:false,error}`.
+
+This is a **pure server-side change** — `npm run compile` + `/mcp` reconnect, **no `.eext`
+re-import**.
+
+### Verify file-path ingestion (PCB tab focused, footprints placed)
+1. `pcb_get_netlist(Protel2)` → snapshot.
+2. `pcb_set_netlist(type="Protel2", path="/…/OmniRemote-PhysicalRemote/Hardware/wand_full.protel2.txt")`
+   → expect `{submitted:true, applied:true, changed:true}`. **Pass an absolute path.**
+3. `pcb_get_all_nets` → the 68 nets. Then forward-tests C→D→E.
+4. Bad path → `{submitted:false, error:"Could not read netlist from path … file not found …"}`
+   (no bridge call made). Passing both `netlist` and `path` → `error` about EITHER/OR.
+
+The `resolveNetlistInput` helper is unit-tested (inline-verbatim, CRLF-preserved read,
+both/neither/missing-file errors all pass); the live end-to-end apply still needs an EDA Pro
+connection to confirm `applied:true/changed:true` on the real board.
+
+## Easier netmapping: `pcb_apply_netlist` + preflight diagnostics (v1.2.1)
+
+**Problem:** connectivity has to happen on the PCB (the schematic side is permanently dead
+— EDA Pro never recomputes API-created wires/labels/`setNetlist`; see `MCP_NETLIST_CONNECTIVITY_FINDINGS.md`).
+The PCB path (`pcb_import_changes` to place the footprints → `pcb_set_netlist` to assign nets)
+worked, but was **two manual steps** and failed **opaquely**: an empty PCB or a designator
+mismatch just returned `applied:false` with a generic "check your designators" guess, so a
+session couldn't tell whether the fix was "run the import first" or "your netlist is wrong."
+
+**Fix — two server-side additions (`tools/write-tools.ts`, `tools/util.ts`):**
+
+1. **`pcb_apply_netlist` — the one-shot easy button.** Runs `pcb.document.importChanges`
+   (schematic → PCB, so the 113 footprints exist) **then** `PCB_Net.setNetlist` in a single
+   call. Takes the same `type` / `netlist` / `path` as `pcb_set_netlist`, plus
+   `schematicUuid` (import source) and `skipImport:true` (footprints already placed). This is
+   the programmatic equivalent of the manual "PCB → File → Import → Netlist" the user was
+   doing by hand.
+2. **Preflight on both `pcb_apply_netlist` and `pcb_set_netlist`.** Before calling the API it
+   reads `pcb.getAll.component` (footprint count + designators) and parses the netlist
+   (`parseNetlistSummary`), then:
+   - **0 footprints → hard stop** with `{submitted:false, note:"PCB has 0 footprints … run
+     pcb_apply_netlist or pcb_import_changes first"}` (doesn't waste the API call).
+   - Cross-checks netlist designators vs. placed footprints and, when the apply fails, names
+     the **missing designators** in the note + `preflight.missingFromPcb` instead of guessing.
+   - Reports `preflight: {footprintsOnPcb, netlistComponents, netlistNets, missingFromPcb, missingCount}`.
+
+`parseNetlistSummary` parses the Protel2 dialect (`[…]` component blocks → designators,
+`(…)` net blocks → net names + `DESIG-PIN` refs); other dialects degrade to `format:"unknown"`
+with null counts so the diagnostic never reports wrong numbers. Verified against the real
+`wand_full.protel2.txt`: **113 components, 68 nets, all 109 referenced designators resolve,
+CRLF intact.**
+
+**Pure server-side change** — `npm run compile` + `/mcp` reconnect, **no `.eext` re-import**
+(uses only pre-existing bridge handlers).
+
+### Verify (PCB tab focused)
+1. Blank PCB → `pcb_set_netlist(type="Protel2", path="…/wand_full.protel2.txt")` → expect
+   `{submitted:false, note:"PCB has 0 footprints …"}` (the hard stop).
+2. `pcb_apply_netlist(type="Protel2", path="…/wand_full.protel2.txt")` → expect
+   `{importedChanges:…, submitted:true, applied:true, changed:true, preflight:{footprintsOnPcb:113, netlistComponents:113, netlistNets:68, missingCount:0}}`.
+3. `pcb_get_all_nets` → the 68 nets. If `applied:false`, read `note` / `preflight.missingFromPcb`.
+
+## Session lifecycle & takeover (v1.2.0)
+
+**Symptom:** the MCP server didn't disconnect when a Claude session ended. Ending a
+session left an **orphaned `node dist/mcp-server/index.js`** still holding port 15168, so
+the next session hit `EADDRINUSE`, reported "extension not connected" for every tool, and
+the user had to manually find and `kill` the zombie PID before another session could work.
+
+**Root cause:** the MCP server is the WebSocket *server* (the extension dials *in* to fixed
+port 15168), so only one process can own the port. `index.ts` only handled
+`SIGINT`/`SIGTERM`. When a session ends, Claude Code closes the server's **stdin** — but the
+`WebSocketServer` plus the 10 s ping intervals keep Node's event loop alive, so closing
+stdin alone never exited the process. It orphaned and squatted on the port.
+
+**Fix (two complementary, server-side changes):**
+- **Exit with the session** (`index.ts`): a single-shot `shutdown()` is wired to
+  `transport.onclose`, `process.stdin` `end`/`close`, *and* the existing signals. Closing
+  stdin (session end) now stops the bridge and exits → the port frees immediately.
+- **Active takeover** (`bridge.ts`): on `EADDRINUSE` the new server connects to the
+  incumbent and sends `{type:"takeover", pid}`. The incumbent's message handler invokes
+  `onTakeover` (wired to `shutdown` in `index.ts`) → it stops and exits, and the newcomer
+  binds on the next retry (now **1.5 s**, was 5 s). "Latest session wins." A takeover-unaware
+  old build simply ignores the message and the passive rebind loop still eventually wins, so
+  it's backward-safe.
+
+**Handoff note:** after a takeover the extension's socket to the old server drops; it
+re-attaches to the new server via its staleness check (~25 s) or immediately on EasyEDA
+window **focus**. Pure server-side change — `npm run compile` + `/mcp` reconnect, **no
+`.eext` re-import**.
+
+### Verify session lifecycle (no live EDA Pro needed)
+1. Start server on a scratch port, confirm it `LISTEN`s: `EDA_WS_PORT=15197 node dist/mcp-server/index.js` fed by a real pipe.
+2. Close the pipe (simulates session end) → log shows `Shutting down (stdin end)` and the port frees. ✅
+3. Start server A, then server B on the same port → B logs `EADDRINUSE`, A logs `Takeover requested … relinquishing`, A **exits**, B binds. ✅
+   (Verified with real anonymous pipes — note a **FIFO** does *not* deliver EOF to Node like the anonymous pipe `spawn` uses, so test with a real pipe, not `mkfifo`.)
 
 ## Known EasyEDA-API limits (documented, not fixable in the server)
 

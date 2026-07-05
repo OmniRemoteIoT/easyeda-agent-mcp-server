@@ -1,7 +1,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import type { WebSocketBridge } from '../bridge';
-import { textResult } from './util';
+import { textResult, resolveNetlistInput, parseNetlistSummary, extractDesignator, type NetlistSummary } from './util';
 
 const DELETE_HANDLER_MAP: Record<string, string> = {
 	component: 'pcb.delete.component',
@@ -24,6 +24,110 @@ const MODIFY_HANDLER_MAP: Record<string, string> = {
 	fill: 'pcb.modify.fill',
 	region: 'pcb.modify.region',
 };
+
+interface PcbNetlistPreflight {
+	/** Number of footprints currently on the PCB, or null if the count couldn't be read. */
+	footprintsOnPcb: number | null;
+	/** How many PCB designators we could actually read (0 ⇒ mismatch check was skipped). */
+	readableDesignators: number;
+	summary: NetlistSummary;
+	/** Netlist component designators with no matching footprint on the PCB (only when readable). */
+	missingDesignators: string[];
+}
+
+/**
+ * Inspect the PCB and the netlist BEFORE applying so a failed apply reports *why*.
+ * The #1 reason PCB_Net.setNetlist returns false is that the footprints aren't on
+ * the PCB yet (empty board) or their designators don't match the netlist — both are
+ * cheaply detectable here, turning an opaque `applied:false` into an actionable message.
+ * Never throws; unreadable state degrades to nulls.
+ */
+async function pcbNetlistPreflight(bridge: WebSocketBridge, netlist: string): Promise<PcbNetlistPreflight> {
+	const summary = parseNetlistSummary(netlist);
+	let components: unknown;
+	try {
+		components = await bridge.send('pcb.getAll.component', {});
+	} catch {
+		components = undefined;
+	}
+	const arr = Array.isArray(components) ? components : null;
+	const footprintsOnPcb = arr ? arr.length : null;
+	const pcbDesignators = new Set<string>();
+	for (const c of arr ?? []) {
+		const d = extractDesignator(c);
+		if (d) pcbDesignators.add(d);
+	}
+	const readableDesignators = pcbDesignators.size;
+	const missingDesignators =
+		readableDesignators > 0 && summary.designators.length > 0
+			? summary.designators.filter((d) => !pcbDesignators.has(d))
+			: [];
+	return { footprintsOnPcb, readableDesignators, summary, missingDesignators };
+}
+
+/** Compact, model-friendly view of the preflight for the tool result. */
+function preflightReport(pf: PcbNetlistPreflight) {
+	const MAX = 20;
+	return {
+		footprintsOnPcb: pf.footprintsOnPcb,
+		netlistComponents: pf.summary.componentCount,
+		netlistNets: pf.summary.netCount,
+		missingFromPcb: pf.missingDesignators.slice(0, MAX),
+		missingCount: pf.missingDesignators.length,
+	};
+}
+
+/**
+ * Shared PCB-netlist apply: preflight → hard-stop on an empty board → call
+ * PCB_Net.setNetlist → before/after read-back → actionable note. Used by both
+ * `pcb_set_netlist` and the one-shot `pcb_apply_netlist`.
+ */
+async function applyPcbNetlist(bridge: WebSocketBridge, type: string | undefined, netlist: string) {
+	const pf = await pcbNetlistPreflight(bridge, netlist);
+	const report = preflightReport(pf);
+
+	// Empty board: nets have nothing to attach to. Don't bother the API — tell the caller how to fix it.
+	if (pf.footprintsOnPcb === 0) {
+		return {
+			submitted: false,
+			applied: false,
+			changed: false,
+			preflight: report,
+			note: 'PCB has 0 footprints, so a netlist has nothing to attach to. Push the schematic parts onto the PCB first — use the one-shot `pcb_apply_netlist` tool (it runs the import for you) or call `pcb_import_changes`, then retry.',
+		};
+	}
+
+	let before: unknown;
+	try {
+		before = await bridge.send('pcb.net.getNetlist', { type });
+	} catch {
+		before = undefined;
+	}
+	const applied = await bridge.send('pcb.net.setNetlist', { type, netlist });
+	let after: unknown;
+	try {
+		after = await bridge.send('pcb.net.getNetlist', { type });
+	} catch {
+		after = undefined;
+	}
+	const readBackAvailable = typeof after === 'string';
+	const changed = readBackAvailable ? after !== before : null;
+
+	// Prefer the concrete preflight explanation when the apply didn't land.
+	const mismatchHint =
+		pf.missingDesignators.length > 0
+			? ` ${pf.missingDesignators.length} netlist designator(s) have no matching footprint on the PCB (e.g. ${pf.missingDesignators.slice(0, 8).join(', ')}) — run pcb_import_changes so the parts exist, or fix the designators.`
+			: '';
+	const note =
+		applied === false
+			? `PCB_Net.setNetlist returned false — the write was rejected.${mismatchHint || ' Check that the footprints are placed with matching designators and that the netlist dialect matches `type`.'} Otherwise fall back to native File → Import Netlist.`
+			: changed === false
+				? `setNetlist returned truthy but the PCB netlist is unchanged on read-back.${mismatchHint} Verify the netlist actually differs from the current one, or fall back to native File → Import Netlist.`
+				: changed === true
+					? 'Netlist applied — PCB net model changed on read-back.'
+					: 'Netlist submitted; read-back verification unavailable (could not re-read the PCB netlist).';
+	return { submitted: true, applied, changed, preflight: report, note };
+}
 
 export function registerWriteTools(server: McpServer, bridge: WebSocketBridge): void {
 	// === Create Tools (keep separate — different param schemas) ===
@@ -223,41 +327,79 @@ All types support: primitiveLock`,
 
 	server.tool(
 		'pcb_set_netlist',
-		'Apply a netlist to the PCB (assign nets to the placed footprints\' pads by designator-pin, building the ratsnest). This wraps EDA Pro\'s PCB_Net.setNetlist, which — unlike the schematic\'s @beta sch_set_netlist — is a @public API that returns a real boolean success flag. This is the recommended programmatic path to establish connectivity on the PCB when sch_set_netlist no-ops: place footprints first (via pcb_import from the schematic or manually), then feed the full [components]+(nets) netlist here. The tool reports the API\'s boolean (`applied`) plus a before/after read-back (`changed`) so a silent no-op is visible. If applied/changed are false, fall back to native File → Import Netlist. type must match the netlist string format.',
+		'Apply a netlist to the PCB (assign nets to the placed footprints\' pads by designator-pin, building the ratsnest). This wraps EDA Pro\'s PCB_Net.setNetlist, which — unlike the schematic\'s @beta sch_set_netlist — is a @public API that returns a real boolean success flag. This is the recommended programmatic path to establish connectivity on the PCB when sch_set_netlist no-ops: place footprints first (via pcb_import from the schematic or manually), then feed the full [components]+(nets) netlist here. Provide the netlist EITHER inline via `netlist` OR — strongly preferred for real boards — via `path` (the server reads the file from disk, avoiding the model output-token limit and preserving CRLF exactly; a big Protel2 netlist cannot be passed inline without truncation/CRLF corruption). The tool reports the API\'s boolean (`applied`) plus a before/after read-back (`changed`) so a silent no-op is visible. If applied/changed are false, fall back to native File → Import Netlist. type must match the netlist string format.',
 		{
 			type: z
 				.enum(['Allegro', 'PADS', 'Protel2', 'JLCEDA', 'EasyEDA', 'DISA'])
 				.optional()
 				.describe('Netlist format type (must match the netlist string)'),
-			netlist: z.string().describe('Netlist data string (same format as pcb_get_netlist / sch_get_netlist output)'),
+			netlist: z
+				.string()
+				.optional()
+				.describe('Netlist data string (same format as pcb_get_netlist / sch_get_netlist output). Provide EITHER this OR `path`. For a full board (~150 KB) use `path` instead — an inline arg hits the output-token limit and loses CRLF.'),
+			path: z
+				.string()
+				.optional()
+				.describe('Absolute filesystem path to a netlist file the SERVER reads directly from disk (CRLF preserved, zero token cost). Preferred for real boards, e.g. "/…/Hardware/wand_full.protel2.txt". Provide EITHER this OR `netlist`.'),
 		},
-		async ({ type, netlist }) => {
-			// Snapshot before/after and also capture the API's own boolean so a silent
-			// no-op is distinguishable from a real apply.
-			let before: unknown;
+		async ({ type, netlist: netlistArg, path }) => {
+			let netlist: string;
 			try {
-				before = await bridge.send('pcb.net.getNetlist', { type });
-			} catch {
-				before = undefined;
+				netlist = resolveNetlistInput(netlistArg, path);
+			} catch (err) {
+				return textResult({ submitted: false, error: String((err as Error)?.message ?? err) });
 			}
-			const applied = await bridge.send('pcb.net.setNetlist', { type, netlist });
-			let after: unknown;
+			// Preflight (footprint count + designator cross-check) then apply with a
+			// before/after read-back, so a no-op or designator mismatch is spelled out.
+			return textResult(await applyPcbNetlist(bridge, type, netlist));
+		},
+	);
+
+	server.tool(
+		'pcb_apply_netlist',
+		'\u2605 One-shot connectivity: push the schematic\u2019s parts onto the PCB, then apply the netlist to build the ratsnest \u2014 the easiest path to establish connectivity when sch_set_netlist no-ops. Runs pcb_import_changes (schematic \u2192 PCB, so the footprints exist) and then PCB_Net.setNetlist in a single call, with a preflight (footprint count + designator cross-check) and before/after read-back so you can see exactly what happened. Provide the netlist via `path` (strongly preferred \u2014 the server reads the ~150 KB CRLF file off disk, dodging the model output-token limit and CRLF corruption) or inline via `netlist`. Set skipImport=true if the footprints are already on the PCB and you only want the netlist applied. Returns {importedChanges, submitted, applied, changed, preflight, note}. If applied/changed are false, the note and preflight.missingFromPcb say why (usually: designators not on the PCB, or wrong dialect vs `type`).',
+		{
+			type: z
+				.enum(['Allegro', 'PADS', 'Protel2', 'JLCEDA', 'EasyEDA', 'DISA'])
+				.optional()
+				.describe('Netlist format type (must match the netlist string)'),
+			netlist: z
+				.string()
+				.optional()
+				.describe('Netlist data string. Provide EITHER this OR `path`. For a full board (~150 KB) use `path` instead.'),
+			path: z
+				.string()
+				.optional()
+				.describe('Absolute filesystem path to a netlist file the SERVER reads directly from disk (CRLF preserved, zero token cost). Preferred for real boards. Provide EITHER this OR `netlist`.'),
+			schematicUuid: z
+				.string()
+				.optional()
+				.describe('Schematic UUID to import from (uses the PCB\u2019s associated schematic if omitted)'),
+			skipImport: z
+				.boolean()
+				.optional()
+				.describe('Skip the schematic \u2192 PCB import step and only apply the netlist (use when footprints are already placed).'),
+		},
+		async ({ type, netlist: netlistArg, path, schematicUuid, skipImport }) => {
+			let netlist: string;
 			try {
-				after = await bridge.send('pcb.net.getNetlist', { type });
-			} catch {
-				after = undefined;
+				netlist = resolveNetlistInput(netlistArg, path);
+			} catch (err) {
+				return textResult({ submitted: false, error: String((err as Error)?.message ?? err) });
 			}
-			const readBackAvailable = typeof after === 'string';
-			const changed = readBackAvailable ? after !== before : null;
-			const note =
-				applied === false
-					? 'PCB_Net.setNetlist returned false — the write was rejected (check that footprints are placed with matching designators, and the netlist dialect matches `type`). Fall back to native File → Import Netlist.'
-					: changed === false
-						? 'setNetlist returned truthy but the PCB netlist is unchanged on read-back — verify the netlist actually differs from the current one, or fall back to native File → Import Netlist.'
-						: changed === true
-							? 'Netlist applied — PCB net model changed on read-back.'
-							: 'Netlist submitted; read-back verification unavailable (could not re-read the PCB netlist).';
-			return textResult({ submitted: true, applied, changed, note });
+			// Step 1: get the schematic’s parts onto the PCB so the netlist has pads to bind to.
+			let importedChanges: unknown = 'skipped';
+			let importError: string | undefined;
+			if (!skipImport) {
+				try {
+					importedChanges = await bridge.send('pcb.document.importChanges', { uuid: schematicUuid });
+				} catch (err) {
+					importError = String((err as Error)?.message ?? err);
+				}
+			}
+			// Step 2: apply the netlist (with preflight + read-back).
+			const result = await applyPcbNetlist(bridge, type, netlist);
+			return textResult({ importedChanges, ...(importError ? { importError } : {}), ...result });
 		},
 	);
 
