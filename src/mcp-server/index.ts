@@ -7,6 +7,7 @@ import { registerWriteTools } from './tools/write-tools';
 import { registerAnalysisTools } from './tools/analysis-tools';
 import { registerSchReadTools } from './tools/sch-read-tools';
 import { registerSchWriteTools } from './tools/sch-write-tools';
+import { registerSchInjectTools } from './tools/sch-inject';
 import { registerLibTools } from './tools/lib-tools';
 import { registerManufactureTools } from './tools/manufacture-tools';
 import { registerPcbDrcTools } from './tools/pcb-drc-tools';
@@ -29,6 +30,7 @@ async function main() {
 	registerAnalysisTools(server, bridge);
 	registerSchReadTools(server, bridge);
 	registerSchWriteTools(server, bridge);
+	registerSchInjectTools(server, bridge);
 	registerLibTools(server, bridge);
 	registerManufactureTools(server, bridge);
 	registerPcbDrcTools(server, bridge);
