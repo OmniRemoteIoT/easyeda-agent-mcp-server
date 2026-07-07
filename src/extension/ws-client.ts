@@ -253,6 +253,37 @@ async function focusEditorTab(editorPrefix: 'sch' | 'pcb'): Promise<number | und
 	} catch { return undefined; }
 }
 
+/** Reject if `p` doesn't settle within `ms` — turns a hung EDA API call into a fast error. */
+function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+	return Promise.race([
+		p,
+		new Promise<T>((_, reject) => setTimeout(() => reject(new Error(`${label} did not respond within ${ms}ms`)), ms)),
+	]);
+}
+
+/** Clear, actionable message for the "bridge bound to a non-editor context" state. */
+const DETACHED_CONTEXT_MSG =
+	'Bridge is bound to a NON-EDITOR context — getCurrentDocumentInfo() returned nothing, so PCB/schematic reads and writes will hang. ' +
+	'FIX: in EasyEDA Pro, click into the target PCB or schematic canvas, then run Claude > Connect Claude from THAT editor\'s menu to re-bind the bridge, and retry.';
+
+/**
+ * Preflight for editor-scoped (sch./pcb.) commands: confirm the extension actually has
+ * an active editor document. When the bridge is in a background/non-editor context,
+ * `getCurrentDocumentInfo()` returns null and the editor APIs (e.g. `pcb.net.*`) HANG for
+ * the full 120s bridge timeout. Detecting the dead context here fails fast (a few seconds)
+ * with a recovery instruction instead. Returns the active documentType (1=sch, 3=pcb).
+ */
+async function preflightEditorContext(): Promise<number> {
+	for (let i = 0; i < 2; i++) {
+		try {
+			const dt = await withTimeout(getActiveDocType(), 3000, 'getCurrentDocumentInfo');
+			if (dt !== undefined) return dt;
+		} catch { /* hung or errored — retry once */ }
+		await new Promise((r) => setTimeout(r, 250));
+	}
+	throw new Error(DETACHED_CONTEXT_MSG);
+}
+
 // Wrap handlers with context-aware error messages and auto-focus.
 function wrapHandler(
 	method: string,
@@ -261,8 +292,11 @@ function wrapHandler(
 	return async (params) => {
 		// Auto-focus the correct editor and capture the ACTIVE documentType after the attempt.
 		let activeDt: number | undefined;
-		if (method.startsWith('sch.')) activeDt = await focusEditorTab('sch');
-		else if (method.startsWith('pcb.')) activeDt = await focusEditorTab('pcb');
+		if (method.startsWith('sch.') || method.startsWith('pcb.')) {
+			// Fail fast if we're in a non-editor context (else the call hangs for 120s).
+			await preflightEditorContext();
+			activeDt = await focusEditorTab(method.startsWith('pcb.') ? 'pcb' : 'sch');
+		}
 		try {
 			return await handler(params);
 		} catch (err: any) {
@@ -293,12 +327,14 @@ allHandlers['sys.getEditorContext'] = async () => {
 	// Authoritative: the ACTIVE document's type. Do NOT seed from detectEditorType()
 	// (namespace presence) — it always reports 'schematic' and would mask the truth.
 	let editorType: 'schematic' | 'pcb' | 'unknown' = 'unknown';
+	let editorContextHealthy = false;
 	try {
-		const info = await eda.dmt_EditorControl.getCurrentDocumentInfo();
+		const info = await withTimeout(eda.dmt_EditorControl.getCurrentDocumentInfo(), 3000, 'getCurrentDocumentInfo');
 		const dt = (info as any)?.documentType;
 		if (dt === 1) editorType = 'schematic';
 		else if (dt === 3) editorType = 'pcb';
-	} catch { /* leave as unknown */ }
+		if (info != null) editorContextHealthy = true;
+	} catch { /* leave as unknown / unhealthy */ }
 	// Self-heal bridge routing: if our type resolved to something concrete since
 	// connect (common after a reconnect where it was 'unknown'), tell the bridge.
 	reIdentify(editorType);
@@ -314,6 +350,11 @@ allHandlers['sys.getEditorContext'] = async () => {
 		editorType,
 		schematicAvailable: editorType === 'schematic',
 		pcbAvailable: editorType === 'pcb',
+		// False = the bridge is in a non-editor/background context: getCurrentDocumentInfo
+		// returned nothing, so editor-scoped reads/writes will fail. Reconnect from the
+		// editor's Claude menu with the canvas focused to re-bind.
+		editorContextHealthy,
+		...(editorContextHealthy ? {} : { hint: DETACHED_CONTEXT_MSG }),
 		projectName,
 	};
 };
@@ -445,6 +486,16 @@ export function connectToMcpServer(extensionUuid: string): void {
 			if (resolvedType !== 'unknown') editorType = resolvedType;
 			const label = editorType === 'unknown' ? '' : ` (${editorType})`;
 			eda.sys_Message.showMessage(`Connected to Claude MCP Server${label}`);
+			// If we can't see an active editor document, the bridge bound to a background/
+			// non-editor context — warn proactively so the user re-connects from the editor
+			// menu instead of hitting hung reads/writes later.
+			if (resolvedType === 'unknown') {
+				try {
+					eda.sys_Message.showWarningMessage(
+						'Claude connected, but NOT to an editor context — PCB/schematic commands will fail. Click into the PCB or schematic canvas and run Claude > Connect Claude from that editor to re-bind.',
+					);
+				} catch { /* non-fatal */ }
+			}
 
 			// Gather project info to send with the identify message
 			let projectInfo: Record<string, any> | undefined;
