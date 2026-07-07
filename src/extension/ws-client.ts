@@ -359,6 +359,51 @@ allHandlers['sys.getEditorContext'] = async () => {
 	};
 };
 
+// Low-level diagnostic battery — bypasses the editor preflight on purpose. Run this live
+// (e.g. with the PCB focused) to pinpoint WHERE the editor-context binding breaks: which
+// eda.* namespaces exist, whether getCurrentDocumentInfo returns a doc or null/hangs,
+// whether the extension can still enumerate open tabs (getSplitScreenTree) even when the
+// "current document" is null, and whether a trivial editor read (pcb.net) hangs.
+allHandlers['sys.diagnose'] = async () => {
+	const probe = async (label: string, fn: () => any, ms = 4000) => {
+		const t0 = Date.now();
+		try {
+			const v = await withTimeout(Promise.resolve().then(fn), ms, label);
+			return { ok: true, ms: Date.now() - t0, value: summarizeProbe(v) };
+		} catch (e: any) {
+			return { ok: false, ms: Date.now() - t0, error: e instanceof Error ? e.message : String(e) };
+		}
+	};
+	const e = eda as any;
+	return {
+		namespaces: {
+			sch_Document: typeof e.sch_Document,
+			pcb_Document: typeof e.pcb_Document,
+			pcb_Net: typeof e.pcb_Net,
+			dmt_EditorControl: typeof e.dmt_EditorControl,
+			dmt_Project: typeof e.dmt_Project,
+		},
+		getCurrentDocumentInfo: await probe('getCurrentDocumentInfo', () => eda.dmt_EditorControl.getCurrentDocumentInfo()),
+		getCurrentProjectInfo: await probe('getCurrentProjectInfo', () => eda.dmt_Project.getCurrentProjectInfo()),
+		getSplitScreenTree: await probe('getSplitScreenTree', () => eda.dmt_EditorControl.getSplitScreenTree()),
+		pcbNetNames: await probe('pcb.net.getAllNetsName', () => e.pcb_Net?.getAllNetsName?.(), 6000),
+	};
+};
+
+/** Compact, JSON-safe summary of a probe value (avoid dumping huge objects). */
+function summarizeProbe(v: any): unknown {
+	if (v == null) return v;
+	if (Array.isArray(v)) return { array: true, length: v.length, sample: v.slice(0, 5) };
+	if (typeof v === 'object') {
+		const o = v as Record<string, any>;
+		if ('documentType' in o || 'uuid' in o) return { documentType: o.documentType, uuid: o.uuid, title: o.title };
+		if ('friendlyName' in o) return { friendlyName: o.friendlyName, uuid: o.uuid, dataCount: Array.isArray(o.data) ? o.data.length : undefined };
+		const keys = Object.keys(o);
+		return { keys: keys.slice(0, 12), keyCount: keys.length };
+	}
+	return v;
+}
+
 // Heartbeat response so the bridge can detect dead connections
 allHandlers['sys.ping'] = async () => ({ pong: true });
 

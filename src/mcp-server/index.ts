@@ -57,6 +57,16 @@ async function main() {
 	);
 
 	server.tool(
+		'bridge_diagnose',
+		'Low-level diagnostic battery for the extension↔editor binding. Run this (ideally with the PCB or schematic canvas focused) when editor commands hang or report a non-editor context. Reports which eda.* namespaces exist and, for each of getCurrentDocumentInfo / getCurrentProjectInfo / getSplitScreenTree / pcb.net.getAllNetsName: whether it succeeded, how long it took (ms), and its value or error — so you can see exactly where the editor-context binding breaks (e.g. the instance can enumerate tabs via getSplitScreenTree but getCurrentDocumentInfo returns null and pcb.net hangs). Does not go through the editor preflight.',
+		{},
+		async () => {
+			const result = await bridge.send('sys.diagnose');
+			return textResult(result);
+		},
+	);
+
+	server.tool(
 		'set_active_editor',
 		'Bring a document (schematic page or PCB) to the foreground AND make it the ACTIVE editor so subsequent sch_*/pcb_* WRITES target it. This is the fix when writes fail with "make sure a … tab is focused" (e.g. after a reconnect the active-document pointer is stale): openDocument alone opens a tab but does not activate it — this opens then calls activateDocument. Pass the document UUID from get_project (the schematic PAGE uuid or the PCB uuid).',
 		{
