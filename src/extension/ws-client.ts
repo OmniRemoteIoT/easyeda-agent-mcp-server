@@ -74,6 +74,26 @@ let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let idleTimer: ReturnType<typeof setTimeout> | null = null;
 let reconnectDelay = 2000;
 let activeExtensionUuid = '';
+/** WS_ID of the currently-registered socket, so we can re-send identify frames. */
+let currentWsId = '';
+/** Last editorType we told the bridge, to avoid redundant re-identify frames. */
+let lastIdentifiedType: EditorType = 'unknown';
+
+type EditorType = 'schematic' | 'pcb' | 'unknown';
+
+/**
+ * Re-send the identify frame if our detected editor type has changed (e.g. it was
+ * 'unknown' at connect time and resolved later). Keeps the bridge's per-client
+ * editorType — which drives sch/pcb command routing and get_editor_context's
+ * connectedEditors — in sync with reality after a reconnect.
+ */
+function reIdentify(editorType: EditorType): void {
+	if (editorType === 'unknown' || editorType === lastIdentifiedType || !currentWsId || !activeExtensionUuid) return;
+	try {
+		eda.sys_WebSocket.send(currentWsId, JSON.stringify({ type: 'identify', editorType }), activeExtensionUuid);
+		lastIdentifiedType = editorType;
+	} catch { /* non-fatal */ }
+}
 /** Timestamp of the last frame received from the server — used for staleness detection. */
 let lastMessageAt = 0;
 /** True after the first successful connect — prevents repeated auto-open on reconnects. */
@@ -192,8 +212,16 @@ async function focusEditorTab(editorPrefix: 'sch' | 'pcb'): Promise<void> {
 			(await findPairedDocUuid((docInfo as any)?.uuid, editorPrefix)) ??
 			(await findEditorDocUuid(editorPrefix));
 		if (targetUuid) {
-			await eda.dmt_EditorControl.openDocument(targetUuid);
-			// openDocument resolves before the canvas is interactive; wait briefly.
+			// openDocument opens/returns a TAB but does NOT make it the active editor —
+			// writes (pcb_*/sch_* create) target the ACTIVE document, so we must also
+			// activateDocument(tabId). Without this, after a reconnect the active-doc
+			// pointer stays on the other editor and every write fails with "make sure a
+			// … tab is focused" even though the tab is open.
+			const tabId = await eda.dmt_EditorControl.openDocument(targetUuid);
+			if (tabId) {
+				try { await eda.dmt_EditorControl.activateDocument(tabId); } catch { /* non-fatal */ }
+			}
+			// openDocument/activate resolve before the canvas is interactive; wait briefly.
 			await new Promise((r) => setTimeout(r, 200));
 		}
 	} catch { /* non-fatal */ }
@@ -241,6 +269,9 @@ allHandlers['sys.getEditorContext'] = async () => {
 		if (dt === 1) editorType = 'schematic';
 		else if (dt === 3) editorType = 'pcb';
 	} catch { /* fall back to detectEditorType */ }
+	// Self-heal bridge routing: if our type resolved to something concrete since
+	// connect (common after a reconnect where it was 'unknown'), tell the bridge.
+	reIdentify(editorType);
 	// Also try to get the current project name for context
 	let projectName: string | undefined;
 	try {
@@ -325,6 +356,8 @@ export function connectToMcpServer(extensionUuid: string): void {
 	setupFocusReconnect(extensionUuid);
 
 	const WS_ID = getWsId();
+	currentWsId = WS_ID;
+	lastIdentifiedType = 'unknown';
 	let editorType = detectEditorType();
 
 	// Close any existing connection before re-registering to avoid duplicate listeners

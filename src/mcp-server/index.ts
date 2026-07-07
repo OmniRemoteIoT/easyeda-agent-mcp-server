@@ -13,6 +13,7 @@ import { registerManufactureTools } from './tools/manufacture-tools';
 import { registerPcbDrcTools } from './tools/pcb-drc-tools';
 import { registerPcbLayerTools } from './tools/pcb-layer-tools';
 import { registerPourFillTools } from './tools/pour-fill-tools';
+import { textResult } from './tools/util';
 
 const WS_PORT = Number(process.env.EDA_WS_PORT) || 15168;
 
@@ -40,11 +41,30 @@ async function main() {
 	// System tools
 	server.tool(
 		'get_editor_context',
-		'Check which EDA Pro editor is currently active and what APIs are available. Call this before running sch_* or pcb_* commands to verify the correct editor is focused.',
+		'Check which EDA Pro editor is active and what is connected. Reports `editorType`/`schematicAvailable`/`pcbAvailable` (the ACTIVE document of the answering instance) plus `connectedEditors` (all editor clients the bridge sees) and `clientCount`. If a write fails with "make sure a … tab is focused", call set_active_editor(<uuid>) to activate the target document. NOTE: `editorType` reflects the active document; after a reconnect it may lag until something activates the intended editor — trust `connectedEditors` for what is reachable.',
 		{},
 		async () => {
-			const result = await bridge.send('sys.getEditorContext');
-			return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+			let ext: Record<string, unknown> = {};
+			try {
+				ext = (await bridge.send('sys.getEditorContext')) as Record<string, unknown>;
+			} catch (err) {
+				ext = { connected: bridge.isConnected(), error: String((err as Error)?.message ?? err) };
+			}
+			// Authoritative from the bridge: which editor client types are actually connected.
+			const connectedEditors = Array.from(new Set(bridge.getConnectedEditorTypes()));
+			return textResult({ ...ext, connectedEditors, clientCount: bridge.getClientCount() });
+		},
+	);
+
+	server.tool(
+		'set_active_editor',
+		'Bring a document (schematic page or PCB) to the foreground AND make it the ACTIVE editor so subsequent sch_*/pcb_* WRITES target it. This is the fix when writes fail with "make sure a … tab is focused" (e.g. after a reconnect the active-document pointer is stale): openDocument alone opens a tab but does not activate it — this opens then calls activateDocument. Pass the document UUID from get_project (the schematic PAGE uuid or the PCB uuid).',
+		{
+			documentUuid: z.string().describe('UUID of the schematic page or PCB to activate (from get_project)'),
+		},
+		async ({ documentUuid }) => {
+			const result = await bridge.send('sys.editor.setActiveDocument', { documentUuid });
+			return textResult(result);
 		},
 	);
 
@@ -141,16 +161,14 @@ Returns true on success.`,
 
 	server.tool(
 		'open_document',
-		`Open a specific document (schematic page, PCB, or panel) in the EasyEDA Pro editor by UUID.
-Get UUIDs from get_project. Optionally place it in a specific split-screen pane (use get_split_screen_tree to find pane IDs).
-Returns the tab ID of the opened document.`,
+		`Open a document (schematic page, PCB, or panel) in the EasyEDA Pro editor by UUID and ACTIVATE it (bring to foreground + make it the active editor, so writes target it). Get UUIDs from get_project. Optionally place it in a specific split-screen pane (use get_split_screen_tree to find pane IDs). Returns {tabId, activated}. (To only activate an already-open doc, set_active_editor does the same open+activate.)`,
 		{
 			documentUuid: z.string().describe('UUID of the schematic page, PCB, or panel to open'),
 			splitScreenId: z.string().optional().describe('Optional split-screen pane ID to open the document in'),
 		},
 		async ({ documentUuid, splitScreenId }) => {
 			const result = await bridge.send('sys.document.open', { documentUuid, splitScreenId });
-			return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+			return textResult(result);
 		},
 	);
 

@@ -14,9 +14,32 @@ export const projectHandlers: Record<string, (params: Record<string, any>) => Pr
 		return eda.dmt_EditorControl.getCurrentDocumentInfo();
 	},
 
-	// Open a document (schematic page UUID, PCB UUID, or panel UUID) in the editor
+	// Open a document (schematic page UUID, PCB UUID, or panel UUID) in the editor,
+	// then ACTIVATE its tab. openDocument alone only opens the tab; activateDocument
+	// makes it the active editor so subsequent writes target it.
 	'sys.document.open': async (params) => {
-		return eda.dmt_EditorControl.openDocument(params.documentUuid, params.splitScreenId);
+		const tabId = await eda.dmt_EditorControl.openDocument(params.documentUuid, params.splitScreenId);
+		let activated = false;
+		if (tabId) {
+			try { activated = await eda.dmt_EditorControl.activateDocument(tabId); } catch { /* non-fatal */ }
+		}
+		return { tabId, activated };
+	},
+
+	// Activate an already-open tab by its tab id (bring to foreground + make active editor).
+	'sys.editor.activate': async (params) => {
+		return eda.dmt_EditorControl.activateDocument(params.tabId);
+	},
+
+	// Open (if needed) AND activate a document by its UUID — the reliable "focus this
+	// document for writes" primitive. Returns {tabId, activated}.
+	'sys.editor.setActiveDocument': async (params) => {
+		const tabId = await eda.dmt_EditorControl.openDocument(params.documentUuid);
+		let activated = false;
+		if (tabId) {
+			try { activated = await eda.dmt_EditorControl.activateDocument(tabId); } catch { /* non-fatal */ }
+		}
+		return { tabId, activated };
 	},
 
 	// Close a document tab by its tab ID
@@ -81,14 +104,18 @@ export const projectHandlers: Record<string, (params: Record<string, any>) => Pr
 		let schPageUuid: string | undefined;
 		let pcbUuid: string | undefined;
 
+		// itemType uses mixed case in the project tree ("Schematic", "PCB", "Board") —
+		// compare case-insensitively (uppercase-only checks silently found nothing → the
+		// "No schematic found" bug even when get_project lists schematics).
 		for (const item of project.data) {
-			if (!schPageUuid && (item as any).itemType === 'SCHEMATIC') {
+			const t = String((item as any).itemType || '').toUpperCase();
+			if (!schPageUuid && t === 'SCHEMATIC') {
 				const sch = item as any;
 				if (sch.page && sch.page.length > 0) {
 					schPageUuid = params.schematicPageUuid || sch.page[0].uuid;
 				}
 			}
-			if (!pcbUuid && (item as any).itemType === 'PCB') {
+			if (!pcbUuid && t === 'PCB') {
 				pcbUuid = params.pcbUuid || (item as any).uuid;
 			}
 			if (schPageUuid && pcbUuid) break;
@@ -97,7 +124,7 @@ export const projectHandlers: Record<string, (params: Record<string, any>) => Pr
 		// Also check under boards (schematic+PCB pairs)
 		if (!schPageUuid || !pcbUuid) {
 			for (const item of project.data) {
-				if ((item as any).itemType === 'BOARD') {
+				if (String((item as any).itemType || '').toUpperCase() === 'BOARD') {
 					const board = item as any;
 					if (!schPageUuid && board.schematic?.page?.length > 0) {
 						schPageUuid = params.schematicPageUuid || board.schematic.page[0].uuid;
@@ -124,6 +151,10 @@ export const projectHandlers: Record<string, (params: Record<string, any>) => Pr
 		// Create a vertical split-screen with the PCB tab
 		const splitResult = await eda.dmt_EditorControl.createSplitScreen('vertical', pcbTabId);
 
+		// Activate the PCB tab so it's the active editor (writes target it) after opening.
+		let pcbActivated = false;
+		try { pcbActivated = await eda.dmt_EditorControl.activateDocument(pcbTabId); } catch { /* non-fatal */ }
+
 		return {
 			projectName: project.friendlyName,
 			projectUuid: project.uuid,
@@ -131,6 +162,7 @@ export const projectHandlers: Record<string, (params: Record<string, any>) => Pr
 			schTabId,
 			pcbUuid,
 			pcbTabId,
+			pcbActivated,
 			splitScreen: splitResult,
 		};
 	},

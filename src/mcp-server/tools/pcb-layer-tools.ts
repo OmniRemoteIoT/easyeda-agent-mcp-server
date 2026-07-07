@@ -1,6 +1,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import type { WebSocketBridge } from '../bridge';
+import { textResult } from './util';
 
 const LAYER_HANDLERS: Record<string, string> = {
 	get_all: 'pcb.layer.getAll',
@@ -60,8 +61,10 @@ export function registerPcbLayerTools(server: McpServer, bridge: WebSocketBridge
 				.describe('Properties to modify (for modify action)'),
 		},
 		async ({ action, ...params }) => {
+			// textResult guards against void-returning actions (e.g. `select`) emitting
+			// `text: undefined`, which the MCP SDK rejects (invalid_union on content[0]).
 			const result = await bridge.send(LAYER_HANDLERS[action], params);
-			return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+			return textResult(result ?? { action, ok: true });
 		},
 	);
 }
