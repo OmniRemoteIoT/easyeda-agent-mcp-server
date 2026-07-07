@@ -49,9 +49,11 @@ function detectEditorType(): 'schematic' | 'pcb' | 'unknown' {
  */
 async function detectEditorTypeReliable(retries = 8, delayMs = 250): Promise<'schematic' | 'pcb' | 'unknown'> {
 	for (let i = 0; i < retries; i++) {
-		const sync = detectEditorType();
-		if (sync !== 'unknown') return sync;
-		// Authoritative fallback: the current document's type (1 = schematic page, 3 = PCB).
+		// AUTHORITATIVE: the active document's type (1 = schematic page, 3 = PCB). This is
+		// checked FIRST because the namespace-presence check (detectEditorType) is unreliable
+		// — `eda.sch_Document` is a globally-present API object, so it always reports
+		// 'schematic' regardless of the real active editor (root of the "connectedEditors is
+		// always ['schematic']" bug).
 		try {
 			const info = await eda.dmt_EditorControl.getCurrentDocumentInfo();
 			const dt = (info as any)?.documentType;
@@ -60,7 +62,8 @@ async function detectEditorTypeReliable(retries = 8, delayMs = 250): Promise<'sc
 		} catch { /* not ready yet */ }
 		await new Promise((r) => setTimeout(r, delayMs));
 	}
-	return 'unknown';
+	// Last resort only if the document info never became available.
+	return detectEditorType();
 }
 
 /** Use a unique WS_ID per editor type so both can coexist without conflict. */
@@ -202,53 +205,78 @@ async function findPairedDocUuid(currentDocUuid: string | undefined, editorPrefi
  * - Only when the focused tab is the WRONG type do we switch — preferring the paired
  *   document of the current board, falling back to the first board's matching doc.
  */
-async function focusEditorTab(editorPrefix: 'sch' | 'pcb'): Promise<void> {
+/** Current active document's type: 1 = schematic page, 3 = PCB (or undefined if unknown). */
+async function getActiveDocType(): Promise<number | undefined> {
 	try {
-		const docInfo = await eda.dmt_EditorControl.getCurrentDocumentInfo();
-		const dt = (docInfo as any)?.documentType;
-		if (editorPrefix === 'sch' && dt === 1) return; // already on a schematic — respect it
-		if (editorPrefix === 'pcb' && dt === 3) return; // already on a PCB — respect it
-		const targetUuid =
-			(await findPairedDocUuid((docInfo as any)?.uuid, editorPrefix)) ??
-			(await findEditorDocUuid(editorPrefix));
-		if (targetUuid) {
-			// openDocument opens/returns a TAB but does NOT make it the active editor —
-			// writes (pcb_*/sch_* create) target the ACTIVE document, so we must also
-			// activateDocument(tabId). Without this, after a reconnect the active-doc
-			// pointer stays on the other editor and every write fails with "make sure a
-			// … tab is focused" even though the tab is open.
-			const tabId = await eda.dmt_EditorControl.openDocument(targetUuid);
-			if (tabId) {
-				try { await eda.dmt_EditorControl.activateDocument(tabId); } catch { /* non-fatal */ }
-			}
-			// openDocument/activate resolve before the canvas is interactive; wait briefly.
-			await new Promise((r) => setTimeout(r, 200));
-		}
-	} catch { /* non-fatal */ }
+		const info = await eda.dmt_EditorControl.getCurrentDocumentInfo();
+		return (info as any)?.documentType;
+	} catch { return undefined; }
 }
 
-// Wrap handlers with context-aware error messages and auto-focus
+/**
+ * Open AND fully activate a document so it becomes the ACTIVE editor that write APIs
+ * target. Activating the tab alone is NOT enough in split-screen: the "current
+ * document" follows the active PANE, so we activate the pane holding the tab too.
+ */
+async function activateDocumentFully(targetUuid: string): Promise<void> {
+	const tabId = await eda.dmt_EditorControl.openDocument(targetUuid);
+	if (!tabId) return;
+	try {
+		const splitId = await eda.dmt_EditorControl.getSplitScreenIdByTabId(tabId);
+		if (splitId) await eda.dmt_EditorControl.activateSplitScreen(splitId);
+	} catch { /* non-fatal */ }
+	try { await eda.dmt_EditorControl.activateDocument(tabId); } catch { /* non-fatal */ }
+	// Activation resolves before the canvas is interactive; wait briefly.
+	await new Promise((r) => setTimeout(r, 200));
+}
+
+/**
+ * Ensure the correct KIND of editor (schematic vs PCB) is the ACTIVE document before a
+ * command. Returns the active documentType AFTER the attempt (1=sch, 3=pcb, or undefined)
+ * so the caller can tell whether activation actually took — a failed switch means the
+ * write's failure is a focus problem, a successful switch means it's a real API error.
+ */
+async function focusEditorTab(editorPrefix: 'sch' | 'pcb'): Promise<number | undefined> {
+	try {
+		let docInfo: any;
+		try { docInfo = await eda.dmt_EditorControl.getCurrentDocumentInfo(); } catch { docInfo = undefined; }
+		let dt = docInfo?.documentType;
+		if ((editorPrefix === 'sch' && dt === 1) || (editorPrefix === 'pcb' && dt === 3)) return dt; // already right — respect it
+		const targetUuid =
+			(await findPairedDocUuid(docInfo?.uuid, editorPrefix)) ??
+			(await findEditorDocUuid(editorPrefix));
+		if (targetUuid) {
+			await activateDocumentFully(targetUuid);
+			dt = await getActiveDocType();
+		}
+		return dt;
+	} catch { return undefined; }
+}
+
+// Wrap handlers with context-aware error messages and auto-focus.
 function wrapHandler(
 	method: string,
 	handler: (params: Record<string, any>) => Promise<any>,
 ): (params: Record<string, any>) => Promise<any> {
 	return async (params) => {
-		// Auto-focus the correct editor tab before running editor-specific commands
-		if (method.startsWith('sch.')) {
-			await focusEditorTab('sch');
-		} else if (method.startsWith('pcb.')) {
-			await focusEditorTab('pcb');
-		}
+		// Auto-focus the correct editor and capture the ACTIVE documentType after the attempt.
+		let activeDt: number | undefined;
+		if (method.startsWith('sch.')) activeDt = await focusEditorTab('sch');
+		else if (method.startsWith('pcb.')) activeDt = await focusEditorTab('pcb');
 		try {
 			return await handler(params);
 		} catch (err: any) {
 			const msg = err instanceof Error ? err.message : String(err);
-			if (method.startsWith('sch.')) {
-				throw new Error(`${msg} — Make sure a schematic editor tab is focused in EasyEDA Pro. Switch to a schematic tab and retry.`);
-			} else if (method.startsWith('pcb.')) {
-				throw new Error(`${msg} — Make sure a PCB editor tab is focused in EasyEDA Pro. Switch to a PCB tab and retry.`);
+			// Only blame focus when the right editor is NOT actually active. If it IS active
+			// (dt matches) the failure is a genuine API/param error — surface it verbatim
+			// instead of the misleading "focus a tab" hint (which sent people down rabbit holes).
+			if (method.startsWith('sch.') && activeDt !== 1) {
+				throw new Error(`${msg} — Could not make a schematic the active editor (active documentType=${activeDt ?? 'unknown'}). Open the schematic and use Claude > Connect Claude from it.`);
 			}
-			throw err;
+			if (method.startsWith('pcb.') && activeDt !== 3) {
+				throw new Error(`${msg} — Could not make the PCB the active editor (active documentType=${activeDt ?? 'unknown'}); the API can't switch the active canvas here. Open ONLY the PCB (close the schematic tab) and use Claude > Connect Claude from the PCB, then retry.`);
+			}
+			throw err; // correct editor is active — this is the real error (e.g. bad parameters/layer name)
 		}
 	};
 }
@@ -262,13 +290,15 @@ for (const [method, handler] of Object.entries(rawHandlers)) {
 // Prefer the active document's type (authoritative) over the sch_Document/pcb_Document
 // presence check, which can't tell which canvas is currently active.
 allHandlers['sys.getEditorContext'] = async () => {
-	let editorType = detectEditorType();
+	// Authoritative: the ACTIVE document's type. Do NOT seed from detectEditorType()
+	// (namespace presence) — it always reports 'schematic' and would mask the truth.
+	let editorType: 'schematic' | 'pcb' | 'unknown' = 'unknown';
 	try {
 		const info = await eda.dmt_EditorControl.getCurrentDocumentInfo();
 		const dt = (info as any)?.documentType;
 		if (dt === 1) editorType = 'schematic';
 		else if (dt === 3) editorType = 'pcb';
-	} catch { /* fall back to detectEditorType */ }
+	} catch { /* leave as unknown */ }
 	// Self-heal bridge routing: if our type resolved to something concrete since
 	// connect (common after a reconnect where it was 'unknown'), tell the bridge.
 	reIdentify(editorType);

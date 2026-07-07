@@ -1,3 +1,45 @@
+/** Active document type: 1 = schematic page, 3 = PCB (undefined if unavailable). */
+async function activeDocType(): Promise<number | undefined> {
+	try { return (await eda.dmt_EditorControl.getCurrentDocumentInfo() as any)?.documentType; }
+	catch { return undefined; }
+}
+
+/**
+ * Open + fully activate a document (activate its split-screen PANE and its TAB), then
+ * report whether the active canvas actually switched. Activating the tab alone does not
+ * switch the "current document" in split-screen — the active pane wins — so we do both.
+ */
+async function activateDocumentByUuid(documentUuid: string, splitScreenId?: string): Promise<Record<string, unknown>> {
+	const before = await activeDocType();
+	const tabId = await eda.dmt_EditorControl.openDocument(documentUuid, splitScreenId);
+	let activated = false;
+	if (tabId) {
+		try {
+			const splitId = await eda.dmt_EditorControl.getSplitScreenIdByTabId(tabId);
+			if (splitId) await eda.dmt_EditorControl.activateSplitScreen(splitId);
+		} catch { /* non-fatal */ }
+		try { activated = await eda.dmt_EditorControl.activateDocument(tabId); } catch { /* non-fatal */ }
+	}
+	await new Promise((r) => setTimeout(r, 150));
+	const after = await activeDocType();
+	const switched = after !== before && after !== undefined;
+	return {
+		tabId,
+		activated,
+		beforeDocumentType: before,
+		afterDocumentType: after,
+		switched,
+		note:
+			after === undefined
+				? 'Could not read the active document after activation.'
+				: !tabId
+					? 'openDocument returned no tab — the uuid may not be a schematic page / PCB / panel.'
+					: switched || after !== before
+						? `Active document is now documentType=${after} (1=schematic, 3=PCB).`
+						: `activateDocument reported ${activated} but the active document did NOT change (still documentType=${after}). This EDA build may not switch the active canvas via the API — manually click the target editor tab in EasyEDA Pro, or open only that document.`,
+	};
+}
+
 export const projectHandlers: Record<string, (params: Record<string, any>) => Promise<any>> = {
 	// Get the currently open project (name, UUID, all schematic/PCB/panel documents)
 	'sys.project.getCurrent': async () => {
@@ -14,16 +56,11 @@ export const projectHandlers: Record<string, (params: Record<string, any>) => Pr
 		return eda.dmt_EditorControl.getCurrentDocumentInfo();
 	},
 
-	// Open a document (schematic page UUID, PCB UUID, or panel UUID) in the editor,
-	// then ACTIVATE its tab. openDocument alone only opens the tab; activateDocument
-	// makes it the active editor so subsequent writes target it.
+	// Open a document (schematic page UUID, PCB UUID, or panel UUID) and ACTIVATE it
+	// (pane + tab). Returns before/after active documentType so callers can see whether
+	// the active canvas actually switched (1 = schematic page, 3 = PCB).
 	'sys.document.open': async (params) => {
-		const tabId = await eda.dmt_EditorControl.openDocument(params.documentUuid, params.splitScreenId);
-		let activated = false;
-		if (tabId) {
-			try { activated = await eda.dmt_EditorControl.activateDocument(tabId); } catch { /* non-fatal */ }
-		}
-		return { tabId, activated };
+		return activateDocumentByUuid(params.documentUuid, params.splitScreenId);
 	},
 
 	// Activate an already-open tab by its tab id (bring to foreground + make active editor).
@@ -31,15 +68,11 @@ export const projectHandlers: Record<string, (params: Record<string, any>) => Pr
 		return eda.dmt_EditorControl.activateDocument(params.tabId);
 	},
 
-	// Open (if needed) AND activate a document by its UUID — the reliable "focus this
-	// document for writes" primitive. Returns {tabId, activated}.
+	// Open (if needed) AND fully activate a document by its UUID — the reliable "focus this
+	// document for writes" primitive. Returns {tabId, activated, beforeDocumentType,
+	// afterDocumentType, switched, note} for diagnosis.
 	'sys.editor.setActiveDocument': async (params) => {
-		const tabId = await eda.dmt_EditorControl.openDocument(params.documentUuid);
-		let activated = false;
-		if (tabId) {
-			try { activated = await eda.dmt_EditorControl.activateDocument(tabId); } catch { /* non-fatal */ }
-		}
-		return { tabId, activated };
+		return activateDocumentByUuid(params.documentUuid);
 	},
 
 	// Close a document tab by its tab ID
