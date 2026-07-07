@@ -1,3 +1,5 @@
+import { resolvePcbLayer } from './layer-util';
+
 export const pourFillHandlers: Record<string, (params: Record<string, any>) => Promise<any>> = {
 	// === Pour ===
 
@@ -16,7 +18,7 @@ export const pourFillHandlers: Record<string, (params: Record<string, any>) => P
 		}
 		return eda.pcb_PrimitivePour.create(
 			params.net,
-			params.layer,
+			(await resolvePcbLayer(params.layer)) as any,
 			polygon,
 			params.pourFillMethod,
 			params.preserveSilos,
@@ -51,7 +53,7 @@ export const pourFillHandlers: Record<string, (params: Record<string, any>) => P
 			throw new Error('Invalid polygon data');
 		}
 		return eda.pcb_PrimitiveFill.create(
-			params.layer,
+			(await resolvePcbLayer(params.layer)) as any,
 			polygon,
 			params.net,
 			params.fillMode,

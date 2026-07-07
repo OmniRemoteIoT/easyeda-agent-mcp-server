@@ -1,3 +1,5 @@
+import { resolvePcbLayer } from './layer-util';
+
 /**
  * Convert a polyline/polygon point list into EDA's flat polygon source array
  * (TPCB_PolygonSourceArray): `[x1, y1, 'L', x2, y2, x3, y3, ...]` — start point first,
@@ -26,9 +28,11 @@ export const trackHandlers: Record<string, (params: Record<string, any>) => Prom
 	},
 
 	'pcb.create.line': async (params) => {
+		// create() needs the numeric layer id, not the name — resolve it (else the LINE is
+		// stored with a string layer and never renders / isn't recognized as an outline).
 		return eda.pcb_PrimitiveLine.create(
 			params.net,
-			params.layer,
+			(await resolvePcbLayer(params.layer)) as any,
 			params.startX,
 			params.startY,
 			params.endX,
@@ -64,7 +68,7 @@ export const trackHandlers: Record<string, (params: Record<string, any>) => Prom
 		if (!polygon) {
 			throw new Error('Could not build a polygon from the given points (pcb_MathPolygon.createPolygon returned nothing). Points must be [{x,y}, ...] with at least 2 vertices.');
 		}
-		return eda.pcb_PrimitivePolyline.create(params.net, params.layer, polygon, params.lineWidth);
+		return eda.pcb_PrimitivePolyline.create(params.net, (await resolvePcbLayer(params.layer)) as any, polygon, params.lineWidth);
 	},
 
 	'pcb.modify.polyline': async (params) => {

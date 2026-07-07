@@ -1,3 +1,5 @@
+import { resolvePcbLayer } from './layer-util';
+
 export const documentHandlers: Record<string, (params: Record<string, any>) => Promise<any>> = {
 	// === Document ===
 
@@ -69,7 +71,7 @@ export const documentHandlers: Record<string, (params: Record<string, any>) => P
 
 	'pcb.create.pad': async (params) => {
 		return eda.pcb_PrimitivePad.create(
-			params.layer,
+			(await resolvePcbLayer(params.layer)) as any,
 			params.padNumber,
 			params.x,
 			params.y,

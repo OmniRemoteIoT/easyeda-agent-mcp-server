@@ -1,3 +1,5 @@
+import { resolvePcbLayer } from './layer-util';
+
 export const pcbPrimitiveHandlers: Record<string, (params: Record<string, any>) => Promise<any>> = {
 	// === Arc ===
 
@@ -12,7 +14,7 @@ export const pcbPrimitiveHandlers: Record<string, (params: Record<string, any>) 
 	'pcb.create.arc': async (params) => {
 		return eda.pcb_PrimitiveArc.create(
 			params.net,
-			params.layer,
+			(await resolvePcbLayer(params.layer)) as any,
 			params.startX,
 			params.startY,
 			params.endX,
@@ -48,7 +50,7 @@ export const pcbPrimitiveHandlers: Record<string, (params: Record<string, any>) 
 			throw new Error('Invalid polygon data');
 		}
 		return eda.pcb_PrimitiveRegion.create(
-			params.layer,
+			(await resolvePcbLayer(params.layer)) as any,
 			polygon,
 			params.ruleType,
 			params.regionName,
