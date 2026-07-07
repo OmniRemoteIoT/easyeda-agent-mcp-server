@@ -1,42 +1,27 @@
-/** Active document type: 1 = schematic page, 3 = PCB (undefined if unavailable). */
-async function activeDocType(): Promise<number | undefined> {
-	try { return (await eda.dmt_EditorControl.getCurrentDocumentInfo() as any)?.documentType; }
-	catch { return undefined; }
-}
-
 /**
- * Open + fully activate a document (activate its split-screen PANE and its TAB), then
- * report whether the active canvas actually switched. Activating the tab alone does not
- * switch the "current document" in split-screen — the active pane wins — so we do both.
+ * Open + activate a document (its split-screen PANE and its TAB) by UUID. Returns the
+ * tabId and per-step results. NOTE: the runtime has no working `getCurrentDocumentInfo`,
+ * so we cannot read back the resulting active documentType — we report what the activation
+ * calls returned instead.
  */
 async function activateDocumentByUuid(documentUuid: string, splitScreenId?: string): Promise<Record<string, unknown>> {
-	const before = await activeDocType();
 	const tabId = await eda.dmt_EditorControl.openDocument(documentUuid, splitScreenId);
+	let paneActivated: boolean | undefined;
 	let activated = false;
 	if (tabId) {
 		try {
 			const splitId = await eda.dmt_EditorControl.getSplitScreenIdByTabId(tabId);
-			if (splitId) await eda.dmt_EditorControl.activateSplitScreen(splitId);
+			if (splitId) paneActivated = await eda.dmt_EditorControl.activateSplitScreen(splitId);
 		} catch { /* non-fatal */ }
 		try { activated = await eda.dmt_EditorControl.activateDocument(tabId); } catch { /* non-fatal */ }
 	}
-	await new Promise((r) => setTimeout(r, 150));
-	const after = await activeDocType();
-	const switched = after !== before && after !== undefined;
 	return {
 		tabId,
 		activated,
-		beforeDocumentType: before,
-		afterDocumentType: after,
-		switched,
-		note:
-			after === undefined
-				? 'Could not read the active document after activation.'
-				: !tabId
-					? 'openDocument returned no tab — the uuid may not be a schematic page / PCB / panel.'
-					: switched || after !== before
-						? `Active document is now documentType=${after} (1=schematic, 3=PCB).`
-						: `activateDocument reported ${activated} but the active document did NOT change (still documentType=${after}). This EDA build may not switch the active canvas via the API — manually click the target editor tab in EasyEDA Pro, or open only that document.`,
+		paneActivated,
+		note: !tabId
+			? 'openDocument returned no tab — the uuid may not be a schematic page / PCB / panel.'
+			: `Opened + activated (activateDocument=${activated}${paneActivated === undefined ? '' : `, activatePane=${paneActivated}`}). Active-document read-back is unavailable in this runtime; if a write still says a tab must be focused, click the ${'target'} editor canvas in EasyEDA Pro.`,
 	};
 }
 

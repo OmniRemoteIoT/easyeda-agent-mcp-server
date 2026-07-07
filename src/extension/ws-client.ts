@@ -43,27 +43,17 @@ function detectEditorType(): 'schematic' | 'pcb' | 'unknown' {
 }
 
 /**
- * Detect the editor type, retrying briefly because `eda.sch_Document` /
- * `eda.pcb_Document` are not always populated the instant the socket connects —
- * detecting too early yielded editorType "unknown", which broke sch/pcb routing.
+ * Detect the editor type for the identify message.
+ *
+ * There is no working runtime API to read the active document's type
+ * (`getCurrentDocumentInfo` does not exist in the EDA Pro runtime), and the
+ * namespace-presence check (`detectEditorType`) always reports 'schematic' because
+ * `eda.sch_Document` is a globally-present object. Since this is a SINGLE global
+ * extension instance that can drive both editors, editor-type routing is unnecessary —
+ * report 'unknown' and let the bridge's single-client fallback route everything.
  */
-async function detectEditorTypeReliable(retries = 8, delayMs = 250): Promise<'schematic' | 'pcb' | 'unknown'> {
-	for (let i = 0; i < retries; i++) {
-		// AUTHORITATIVE: the active document's type (1 = schematic page, 3 = PCB). This is
-		// checked FIRST because the namespace-presence check (detectEditorType) is unreliable
-		// — `eda.sch_Document` is a globally-present API object, so it always reports
-		// 'schematic' regardless of the real active editor (root of the "connectedEditors is
-		// always ['schematic']" bug).
-		try {
-			const info = await eda.dmt_EditorControl.getCurrentDocumentInfo();
-			const dt = (info as any)?.documentType;
-			if (dt === 1) return 'schematic';
-			if (dt === 3) return 'pcb';
-		} catch { /* not ready yet */ }
-		await new Promise((r) => setTimeout(r, delayMs));
-	}
-	// Last resort only if the document info never became available.
-	return detectEditorType();
+async function detectEditorTypeReliable(): Promise<'schematic' | 'pcb' | 'unknown'> {
+	return 'unknown';
 }
 
 /** Use a unique WS_ID per editor type so both can coexist without conflict. */
@@ -205,54 +195,6 @@ async function findPairedDocUuid(currentDocUuid: string | undefined, editorPrefi
  * - Only when the focused tab is the WRONG type do we switch — preferring the paired
  *   document of the current board, falling back to the first board's matching doc.
  */
-/** Current active document's type: 1 = schematic page, 3 = PCB (or undefined if unknown). */
-async function getActiveDocType(): Promise<number | undefined> {
-	try {
-		const info = await eda.dmt_EditorControl.getCurrentDocumentInfo();
-		return (info as any)?.documentType;
-	} catch { return undefined; }
-}
-
-/**
- * Open AND fully activate a document so it becomes the ACTIVE editor that write APIs
- * target. Activating the tab alone is NOT enough in split-screen: the "current
- * document" follows the active PANE, so we activate the pane holding the tab too.
- */
-async function activateDocumentFully(targetUuid: string): Promise<void> {
-	const tabId = await eda.dmt_EditorControl.openDocument(targetUuid);
-	if (!tabId) return;
-	try {
-		const splitId = await eda.dmt_EditorControl.getSplitScreenIdByTabId(tabId);
-		if (splitId) await eda.dmt_EditorControl.activateSplitScreen(splitId);
-	} catch { /* non-fatal */ }
-	try { await eda.dmt_EditorControl.activateDocument(tabId); } catch { /* non-fatal */ }
-	// Activation resolves before the canvas is interactive; wait briefly.
-	await new Promise((r) => setTimeout(r, 200));
-}
-
-/**
- * Ensure the correct KIND of editor (schematic vs PCB) is the ACTIVE document before a
- * command. Returns the active documentType AFTER the attempt (1=sch, 3=pcb, or undefined)
- * so the caller can tell whether activation actually took — a failed switch means the
- * write's failure is a focus problem, a successful switch means it's a real API error.
- */
-async function focusEditorTab(editorPrefix: 'sch' | 'pcb'): Promise<number | undefined> {
-	try {
-		let docInfo: any;
-		try { docInfo = await eda.dmt_EditorControl.getCurrentDocumentInfo(); } catch { docInfo = undefined; }
-		let dt = docInfo?.documentType;
-		if ((editorPrefix === 'sch' && dt === 1) || (editorPrefix === 'pcb' && dt === 3)) return dt; // already right — respect it
-		const targetUuid =
-			(await findPairedDocUuid(docInfo?.uuid, editorPrefix)) ??
-			(await findEditorDocUuid(editorPrefix));
-		if (targetUuid) {
-			await activateDocumentFully(targetUuid);
-			dt = await getActiveDocType();
-		}
-		return dt;
-	} catch { return undefined; }
-}
-
 /** Reject if `p` doesn't settle within `ms` — turns a hung EDA API call into a fast error. */
 function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
 	return Promise.race([
@@ -261,56 +203,32 @@ function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
 	]);
 }
 
-/** Clear, actionable message for the "bridge bound to a non-editor context" state. */
-const DETACHED_CONTEXT_MSG =
-	'Bridge is bound to a NON-EDITOR context — getCurrentDocumentInfo() returned nothing, so PCB/schematic reads and writes will hang. ' +
-	'FIX: in EasyEDA Pro, click into the target PCB or schematic canvas, then run Claude > Connect Claude from THAT editor\'s menu to re-bind the bridge, and retry.';
-
 /**
- * Preflight for editor-scoped (sch./pcb.) commands: confirm the extension actually has
- * an active editor document. When the bridge is in a background/non-editor context,
- * `getCurrentDocumentInfo()` returns null and the editor APIs (e.g. `pcb.net.*`) HANG for
- * the full 120s bridge timeout. Detecting the dead context here fails fast (a few seconds)
- * with a recovery instruction instead. Returns the active documentType (1=sch, 3=pcb).
+ * Wrap handlers with a light error hint.
+ *
+ * IMPORTANT (v1.2.7): earlier versions gated every sch./pcb. command on
+ * `eda.dmt_EditorControl.getCurrentDocumentInfo()` to detect/switch/verify the active
+ * editor. That method DOES NOT EXIST in the EDA Pro runtime — it throws
+ * "getCurrentDocumentInfo is not a function" (confirmed via bridge_diagnose). Meanwhile
+ * the editor APIs themselves (`pcb_*` / `sch_*`, e.g. `pcb_Net.getAllNetsName`) work
+ * directly on their document with no activation. So the detection/focus/preflight
+ * machinery was pure dead weight — and the v1.2.5 preflight was actively BLOCKING every
+ * editor command. We now just run the handler and surface the raw error.
  */
-async function preflightEditorContext(): Promise<number> {
-	for (let i = 0; i < 2; i++) {
-		try {
-			const dt = await withTimeout(getActiveDocType(), 3000, 'getCurrentDocumentInfo');
-			if (dt !== undefined) return dt;
-		} catch { /* hung or errored — retry once */ }
-		await new Promise((r) => setTimeout(r, 250));
-	}
-	throw new Error(DETACHED_CONTEXT_MSG);
-}
-
-// Wrap handlers with context-aware error messages and auto-focus.
 function wrapHandler(
 	method: string,
 	handler: (params: Record<string, any>) => Promise<any>,
 ): (params: Record<string, any>) => Promise<any> {
 	return async (params) => {
-		// Auto-focus the correct editor and capture the ACTIVE documentType after the attempt.
-		let activeDt: number | undefined;
-		if (method.startsWith('sch.') || method.startsWith('pcb.')) {
-			// Fail fast if we're in a non-editor context (else the call hangs for 120s).
-			await preflightEditorContext();
-			activeDt = await focusEditorTab(method.startsWith('pcb.') ? 'pcb' : 'sch');
-		}
 		try {
 			return await handler(params);
 		} catch (err: any) {
 			const msg = err instanceof Error ? err.message : String(err);
-			// Only blame focus when the right editor is NOT actually active. If it IS active
-			// (dt matches) the failure is a genuine API/param error — surface it verbatim
-			// instead of the misleading "focus a tab" hint (which sent people down rabbit holes).
-			if (method.startsWith('sch.') && activeDt !== 1) {
-				throw new Error(`${msg} — Could not make a schematic the active editor (active documentType=${activeDt ?? 'unknown'}). Open the schematic and use Claude > Connect Claude from it.`);
+			if (method.startsWith('sch.') || method.startsWith('pcb.')) {
+				const kind = method.startsWith('pcb.') ? 'PCB' : 'schematic';
+				throw new Error(`${msg} — (${kind} command failed. If it mentions a focused tab, click into the ${kind} canvas in EasyEDA Pro and retry; otherwise this is the raw API error, e.g. bad parameters/layer name.)`);
 			}
-			if (method.startsWith('pcb.') && activeDt !== 3) {
-				throw new Error(`${msg} — Could not make the PCB the active editor (active documentType=${activeDt ?? 'unknown'}); the API can't switch the active canvas here. Open ONLY the PCB (close the schematic tab) and use Claude > Connect Claude from the PCB, then retry.`);
-			}
-			throw err; // correct editor is active — this is the real error (e.g. bad parameters/layer name)
+			throw err;
 		}
 	};
 }
@@ -320,41 +238,34 @@ for (const [method, handler] of Object.entries(rawHandlers)) {
 	allHandlers[method] = wrapHandler(method, handler);
 }
 
-// Editor context detection — reports which editor type is currently active.
-// Prefer the active document's type (authoritative) over the sch_Document/pcb_Document
-// presence check, which can't tell which canvas is currently active.
+// Editor context — reports whether the editor APIs are reachable and the project.
+// There is no working runtime call for the ACTIVE document's type (getCurrentDocumentInfo
+// is missing), so editorType stays 'unknown'; reachability is proven by getCurrentProjectInfo
+// (which works) instead. This is a single instance that can drive both editors directly, so
+// schematicAvailable/pcbAvailable are both reported from reachability, not per-editor.
 allHandlers['sys.getEditorContext'] = async () => {
-	// Authoritative: the ACTIVE document's type. Do NOT seed from detectEditorType()
-	// (namespace presence) — it always reports 'schematic' and would mask the truth.
-	let editorType: 'schematic' | 'pcb' | 'unknown' = 'unknown';
 	let editorContextHealthy = false;
-	try {
-		const info = await withTimeout(eda.dmt_EditorControl.getCurrentDocumentInfo(), 3000, 'getCurrentDocumentInfo');
-		const dt = (info as any)?.documentType;
-		if (dt === 1) editorType = 'schematic';
-		else if (dt === 3) editorType = 'pcb';
-		if (info != null) editorContextHealthy = true;
-	} catch { /* leave as unknown / unhealthy */ }
-	// Self-heal bridge routing: if our type resolved to something concrete since
-	// connect (common after a reconnect where it was 'unknown'), tell the bridge.
-	reIdentify(editorType);
-	// Also try to get the current project name for context
 	let projectName: string | undefined;
 	try {
-		const projectInfo = await eda.dmt_Project.getCurrentProjectInfo();
-		projectName = projectInfo?.friendlyName;
-	} catch { /* non-fatal */ }
+		const projectInfo = await withTimeout(eda.dmt_Project.getCurrentProjectInfo(), 4000, 'getCurrentProjectInfo');
+		if (projectInfo != null) {
+			editorContextHealthy = true;
+			projectName = projectInfo.friendlyName;
+		}
+	} catch { /* project unreachable — editor context not healthy */ }
 
 	return {
 		connected: true,
-		editorType,
-		schematicAvailable: editorType === 'schematic',
-		pcbAvailable: editorType === 'pcb',
-		// False = the bridge is in a non-editor/background context: getCurrentDocumentInfo
-		// returned nothing, so editor-scoped reads/writes will fail. Reconnect from the
-		// editor's Claude menu with the canvas focused to re-bind.
+		// Cannot read the active document's type in this runtime — 'unknown' by design.
+		editorType: 'unknown',
+		// The single instance reaches the pcb_*/sch_* APIs directly; availability tracks
+		// overall reachability rather than which canvas is focused.
+		schematicAvailable: editorContextHealthy,
+		pcbAvailable: editorContextHealthy,
 		editorContextHealthy,
-		...(editorContextHealthy ? {} : { hint: DETACHED_CONTEXT_MSG }),
+		...(editorContextHealthy
+			? {}
+			: { hint: 'Editor APIs unreachable (getCurrentProjectInfo failed) — reconnect via Claude > Connect Claude in EasyEDA Pro.' }),
 		projectName,
 	};
 };
@@ -375,6 +286,18 @@ allHandlers['sys.diagnose'] = async () => {
 		}
 	};
 	const e = eda as any;
+	// Enumerate the REAL runtime methods on an object (own + prototype chain) so we can
+	// discover the correct API names (the type package and the runtime disagree — e.g.
+	// getCurrentDocumentInfo is typed but missing at runtime).
+	const methodsOf = (obj: any): string[] => {
+		const out = new Set<string>();
+		for (let o = obj; o && o !== Object.prototype; o = Object.getPrototypeOf(o)) {
+			for (const n of Object.getOwnPropertyNames(o)) {
+				try { if (typeof obj[n] === 'function' && n !== 'constructor') out.add(n); } catch { /* getter threw */ }
+			}
+		}
+		return [...out].sort();
+	};
 	return {
 		namespaces: {
 			sch_Document: typeof e.sch_Document,
@@ -383,9 +306,13 @@ allHandlers['sys.diagnose'] = async () => {
 			dmt_EditorControl: typeof e.dmt_EditorControl,
 			dmt_Project: typeof e.dmt_Project,
 		},
-		getCurrentDocumentInfo: await probe('getCurrentDocumentInfo', () => eda.dmt_EditorControl.getCurrentDocumentInfo()),
+		// The real method names available at runtime — use these to find the active-doc API.
+		dmtEditorControlMethods: (() => { try { return methodsOf(e.dmt_EditorControl); } catch { return null; } })(),
+		getCurrentDocumentInfo: await probe('getCurrentDocumentInfo', () => e.dmt_EditorControl?.getCurrentDocumentInfo?.()),
 		getCurrentProjectInfo: await probe('getCurrentProjectInfo', () => eda.dmt_Project.getCurrentProjectInfo()),
-		getSplitScreenTree: await probe('getSplitScreenTree', () => eda.dmt_EditorControl.getSplitScreenTree()),
+		// Full split-screen tree (untruncated) — the tabs list every open document + tabId.
+		getSplitScreenTree: await probe('getSplitScreenTree', () => eda.dmt_EditorControl.getSplitScreenTree(), 4000),
+		splitScreenTreeRaw: await (async () => { try { return await withTimeout(eda.dmt_EditorControl.getSplitScreenTree(), 4000, 'tree'); } catch (e2: any) { return { error: String(e2?.message ?? e2) }; } })(),
 		pcbNetNames: await probe('pcb.net.getAllNetsName', () => e.pcb_Net?.getAllNetsName?.(), 6000),
 	};
 };
