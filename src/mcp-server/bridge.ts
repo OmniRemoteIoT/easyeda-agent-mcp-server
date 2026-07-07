@@ -300,11 +300,21 @@ export class WebSocketBridge {
 			}
 		}
 
-		// Fall back to any open client (covers single-client and 'unknown' type)
+		// Fall back to the MOST-RECENTLY-ACTIVE open client. The extension is a single
+		// global instance that reaches both editors and reports editorType 'unknown', so
+		// any open client can serve the command; preferring the freshest one avoids routing
+		// to a stale/lingering connection when more than one is present.
+		let best: WebSocket | null = null;
+		let bestActivity = -1;
 		for (const ws of this.clients) {
-			if (ws.readyState === WebSocket.OPEN) return ws;
+			if (ws.readyState !== WebSocket.OPEN) continue;
+			const activity = this.clientSession.get(ws)?.lastActivityAt ?? 0;
+			if (activity >= bestActivity) {
+				bestActivity = activity;
+				best = ws;
+			}
 		}
-		return null;
+		return best;
 	}
 
 	async send(method: string, params: Record<string, unknown> = {}, options: SendOptions = {}): Promise<unknown> {
@@ -312,13 +322,11 @@ export class WebSocketBridge {
 			throw new Error('EDA Pro Extension is not connected. Open EasyEDA Pro and ensure the extension is loaded (it auto-connects on startup). If already open, use the Claude > Connect Claude menu item.');
 		}
 
-		// For editor-specific commands, check that the right editor type is connected
-		if (method.startsWith('sch.') && !this.hasEditorType('schematic')) {
-			throw new Error('No schematic editor connected. Switch to a schematic tab in EasyEDA Pro and use Claude > Connect Claude if needed.');
-		}
-		if (method.startsWith('pcb.') && !this.hasEditorType('pcb')) {
-			throw new Error('No PCB editor connected. Switch to a PCB tab in EasyEDA Pro and use Claude > Connect Claude if needed.');
-		}
+		// NOTE: we intentionally do NOT gate sch./pcb. on a matching editor-type client.
+		// The extension is a single global instance that reaches both the schematic and PCB
+		// APIs directly and reports editorType 'unknown', so requiring a 'pcb'/'schematic'
+		// typed client wrongly rejected commands whenever >1 client was connected (all
+		// 'unknown'). If no editor is actually reachable the handler will surface that error.
 
 		return new Promise((resolve, reject) => {
 			if (this.activeRequests < this.maxConcurrent) {
