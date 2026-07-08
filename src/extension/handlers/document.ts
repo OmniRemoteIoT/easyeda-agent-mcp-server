@@ -62,7 +62,7 @@ export const documentHandlers: Record<string, (params: Record<string, any>) => P
 	// === Pad ===
 
 	'pcb.getAll.pad': async (params) => {
-		return eda.pcb_PrimitivePad.getAll(params.layer, params.net);
+		return eda.pcb_PrimitivePad.getAll((await resolvePcbLayer(params.layer)) as any, params.net);
 	},
 
 	'pcb.get.pad': async (params) => {
